@@ -4,8 +4,6 @@
 "use strict";
 (function () {
   var el = BV.el, $ = BV.$;
-  var PRESETS = [["15m", "Last 15 minutes", 15 * 60e3], ["1h", "Last hour", 3600e3], ["6h", "Last 6 hours", 6 * 3600e3],
-    ["24h", "Last 24 hours", 86400e3], ["7d", "Last 7 days", 7 * 86400e3], ["30d", "Last 30 days", 30 * 86400e3]];
   var SPLIT_LABELS = { status_class: "Status class" };
   var LIVE_LOGS_MS = 5000, LIVE_CHARTS_MS = 15000;
   var LOG_COLS = [
@@ -30,10 +28,8 @@
   }
   function readUrl() {
     var p = new URLSearchParams(location.search);
-    state.range = p.get("range") || (p.get("from") ? null : "1h");
-    state.from = p.get("from") ? Number(p.get("from")) : null;
-    state.to = p.get("to") ? Number(p.get("to")) : null;
-    if (!state.range && !(state.from < state.to)) state.range = "1h";
+    var r = BV.rangeFromUrl(p);
+    state.range = r.range; state.from = r.from; state.to = r.to;
     state.split = p.has("split") ? p.get("split") : "status_class";
     state.top = p.get("top") || "path";
     state.live = p.get("live") === "1" && !!state.range;
@@ -42,8 +38,7 @@
   }
   function writeUrl(push) {
     var p = new URLSearchParams();
-    if (state.range) p.set("range", state.range);
-    else { p.set("from", state.from); p.set("to", state.to); }
+    BV.rangeToUrl(state, p);
     state.filters.forEach(function (f) { p.append(f[0], f[1]); });
     if (state.split !== "status_class") p.set("split", state.split);
     if (state.top !== "path") p.set("top", state.top);
@@ -51,14 +46,7 @@
     var url = location.pathname + "?" + p.toString();
     if (push) history.pushState(null, "", url); else history.replaceState(null, "", url);
   }
-  function window_() {
-    if (state.range) {
-      var preset = PRESETS.find(function (x) { return x[0] === state.range; }) || PRESETS[1];
-      var now = Date.now();
-      return { from: now - preset[2], to: now };
-    }
-    return { from: state.from, to: state.to };
-  }
+  function window_() { return BV.rangeWindow(state); }
   function apiParams(extra) {
     var w = window_(), p = new URLSearchParams();
     p.set("from", Math.floor(w.from));
@@ -77,53 +65,15 @@
     var f = meta && meta.fields.find(function (x) { return x.name === name; });
     return f ? f.label : name;
   }
-  function rangeLabel() {
-    if (state.range) return PRESETS.find(function (x) { return x[0] === state.range; })[1];
-    var span = state.to - state.from;
-    return BV.when(state.from, span) + " – " + BV.when(state.to, span);
-  }
+  function rangeLabel() { return BV.rangeLabel(state); }
 
   /* ---------- range menu ---------- */
-  function closeMenus(except) {
-    [["rangeMenu", "rangeBtn"], ["addMenu", "addBtn"]].forEach(function (m) {
-      if (m[0] === except) return;
-      $(m[0]).hidden = true;
-      $(m[1]).setAttribute("aria-expanded", "false");
-    });
-  }
-  function toggleMenu(menu, btn) {
-    var open = $(menu).hidden;
-    closeMenus(menu);
-    $(menu).hidden = !open;
-    $(btn).setAttribute("aria-expanded", String(open));
-    return open;
-  }
   function buildRangeMenu() {
-    var menu = BV.clear($("rangeMenu"));
-    var maxMs = meta ? meta.retention.raw_days * 86400e3 : Infinity;
-    PRESETS.forEach(function (p) {
-      if (p[2] > maxMs * 1.01 && p[0] !== "1h") return;
-      menu.appendChild(el("button", { class: "item", type: "button", onclick: function () {
-        state.range = p[0]; state.from = state.to = null;
-        closeMenus(); writeUrl(true); reloadAll();
-      } }, el("span", { class: "check", text: state.range === p[0] ? "✓" : "" }), p[1]));
+    BV.buildRangeMenu($("rangeMenu"), state, meta && meta.retention.raw_days, function (r) {
+      state.range = r.range; state.from = r.from; state.to = r.to;
+      if (!r.range) state.live = false;
+      writeUrl(true); reloadAll();
     });
-    menu.appendChild(el("hr"));
-    var w = window_();
-    var toLocal = function (ms) {
-      var d = new Date(ms - new Date(ms).getTimezoneOffset() * 60e3);
-      return d.toISOString().slice(0, 16);
-    };
-    var fromIn = el("input", { type: "datetime-local", value: toLocal(w.from) });
-    var toIn = el("input", { type: "datetime-local", value: toLocal(w.to) });
-    menu.appendChild(el("div", { class: "custom" },
-      el("label", null, "From", fromIn), el("label", null, "To", toIn),
-      el("button", { class: "btn", type: "button", onclick: function () {
-        var f = new Date(fromIn.value).getTime(), t = new Date(toIn.value).getTime();
-        if (!(f < t)) return;
-        state.range = null; state.from = f; state.to = t; state.live = false;
-        closeMenus(); writeUrl(true); reloadAll();
-      } }, "Apply custom range")));
   }
 
   /* ---------- filters ---------- */
@@ -470,16 +420,11 @@
       reloadAll();
     }).catch(function (e) { showError("fields", e.message); });
 
-    $("rangeBtn").addEventListener("click", function (ev) { ev.stopPropagation(); toggleMenu("rangeMenu", "rangeBtn"); });
-    $("addBtn").addEventListener("click", function (ev) {
-      ev.stopPropagation();
-      if (toggleMenu("addMenu", "addBtn")) $("addValue").focus();
-    });
-    [$("rangeMenu"), $("addMenu")].forEach(function (m) { m.addEventListener("click", function (ev) { ev.stopPropagation(); }); });
-    document.addEventListener("click", function () { closeMenus(); });
+    BV.menu($("rangeBtn"), $("rangeMenu"));
+    BV.menu($("addBtn"), $("addMenu"), function () { $("addValue").focus(); });
     document.addEventListener("keydown", function (ev) {
       if (ev.key !== "Escape") return;
-      if (!$("drawer").hidden) closeDetail(); else closeMenus();
+      if (!$("drawer").hidden) closeDetail(); else BV.closeMenus();
     });
     $("addField").addEventListener("change", onAddFieldChange);
     $("addForm").addEventListener("submit", function (ev) {
@@ -491,7 +436,7 @@
         name = "h." + h;
       }
       if (!value) return;
-      closeMenus();
+      BV.closeMenus();
       addFilter(name, value, $("addOp").value === "not" && !$("addOp").disabled);
     });
     $("splitSel").addEventListener("change", function () { state.split = this.value; writeUrl(false); loadSeries(); });

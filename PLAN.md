@@ -4,7 +4,7 @@ A small, self-hosted request explorer for Traefik. It reads Traefik's JSON acces
 of every request in an embedded columnar database, and serves two pages: an overview of the whole proxy and an
 explorer for slicing requests by time, host, path, status, IP or user agent (chart on top, log lines below).
 
-Status: milestones 1 (ingest + storage) and 2 (Explore + query API) implemented; 3–4 next. Named BeaconView (2026-10-05): independent of the Traefik mark, so it also fits if other proxies
+Status: milestones 1 (ingest + storage), 2 (Explore + query API) and 3 (Overview) implemented; 4 (publish) next. Named BeaconView (2026-10-05): independent of the Traefik mark, so it also fits if other proxies
 (Caddy, nginx JSON logs) are supported later. The README's first line should say it reads access logs and adds no
 tracking, since "web beacon" also means a tracking pixel.
 
@@ -195,14 +195,18 @@ whole query in the URL so any view can be bookmarked or shared. Drag across a ch
 
 ### Overview (`/`)
 
-- **Tiles:** requests, req/s, unique IPs, error rate (5xx and 4xx separately), p95 latency, bytes out — each with the
-  change vs the previous period of the same length.
-- **Chart:** requests over time stacked by status class.
-- **Tables:** routers/services (req/s, error %, p95), top hosts, top IPs, top user agents, top paths, status codes,
-  recent 5xx. Every row links into Explore with that filter applied.
-- **Status strip:** ingest lag (now − newest line), lines/s, parse errors, DB size, row count, oldest row.
+- **Status strip:** ingesting / catching up / stopped, newest request, ingest rate, unreadable lines, rows and DB
+  size, oldest row and retention.
+- **Tiles:** requests, req/s, unique IPs, 5xx rate, 4xx rate, p95, bytes sent — each with the change vs the
+  previous period of the same length (rates in percentage points; red/green only where up is bad: error rates, p95).
+- **Chart:** requests over time stacked by status class (drag to zoom).
+- **Traffic by** router / service / host, sorted busiest, most 5xx or slowest p95 (`/api/breakdown`): req/s,
+  requests, 4xx %, 5xx % (each linking to those requests), p50, p95, bytes.
+- **Top lists:** status codes, paths, client IPs, user agents, hosts; **recent 5xx** (10 newest).
+- Every value links into Explore with that filter and the same range; an instance picker appears when there is
+  more than one log. Relative ranges refresh every minute while the tab is visible.
 
-Counts, bytes and averages come from `minute_stats`; unique IPs and percentiles from `requests`.
+Counts, bytes and percentiles come from `minute_stats` (histograms); unique IPs and raw-field tops from `requests`.
 
 ### Explore (`/explore`)
 
@@ -225,7 +229,7 @@ All JSON, all bounded by a time range, all results capped.
 
 | Endpoint | Returns |
 |---|---|
-| `GET /api/overview?from&to` | tiles, previous-period tiles, status series, top tables (milestone 3) |
+| `GET /api/breakdown?<filters>&by&sort&limit` | per-group requests, req/s, 4xx/5xx, p50/p95, bytes; sort by requests, p95 or errors |
 | `GET /api/summary?<filters>` | requests, req/s, 4xx/5xx, unique IPs, p50/p95, bytes |
 | `GET /api/series?<filters>&buckets&split` | time buckets × series, plus p50/p95 per bucket |
 | `GET /api/top?field&<filters>&limit` | top values with counts and share |
@@ -273,7 +277,7 @@ middleware or the built-in basic auth).
 ```
 beaconview/
   beaconview/        __main__.py  config.py  parsers.py  tailer.py  ingest.py  store.py  query.py  server.py
-    static/            explore.html  app.css  common.js  chart.js  explore.js  logo.svg  (overview in milestone 3)
+    static/            overview.html  overview.js  explore.html  explore.js  common.js  chart.js  app.css  logo.svg
   tests/
   tools/               genlog.py (synthetic Traefik log writer)  bench.py (query timings)
   Dockerfile           python:3.13-slim (DuckDB wheels target glibc)
@@ -356,7 +360,9 @@ v2 adds remote Traefiks without a second codebase:
    load test. Deployable on its own so history starts collecting.
 2. **Explore + query API:** filters, series, top values, logs paging, live mode, URL state. *Done 2026-10-06:
    48 tests; checked in headless Edge at 1440 px and 390 px, both themes, no console errors or page overflow.*
-3. **Overview:** tiles, comparisons, tables, links into Explore, status strip.
+3. **Overview:** tiles, comparisons, tables, links into Explore, status strip. *Done 2026-10-06: built from the
+   existing endpoints plus `/api/breakdown` (no separate `/api/overview`), 49 tests, checked in headless Edge at
+   1440 px and 390 px in both themes; the range picker moved into common.js and is shared by both pages.*
 4. **Publish:** backfill, anonymisation, built-in auth, README (sizing table from the load test, screenshots,
    compose example, Traefik config to keep `User-Agent`/`Referer`/`CF-Connecting-IP`), CI, first GHCR release.
 

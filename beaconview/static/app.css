@@ -226,3 +226,27 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   .tile .value { font-size: 19px; }
   .card { padding: 12px; }
 }
+
+/* ---------- overview ---------- */
+.strip {
+  display: flex; flex-wrap: wrap; gap: 6px 20px; align-items: center; padding: 8px 14px; margin-bottom: 16px;
+  background: var(--surface); border: 1px solid var(--ring); border-radius: 10px; font-size: 13px; color: var(--ink-2);
+}
+.strip .it { display: inline-flex; align-items: center; gap: 6px; }
+.strip b { color: var(--ink); font-weight: 600; }
+.tile .delta { font-size: 12px; margin-top: 2px; color: var(--muted); }
+.tile .delta.good { color: var(--good-ink); }
+.tile .delta.bad { color: var(--critical-ink); }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; align-items: start; }
+.grid .wide { grid-column: 1 / -1; }
+@media (max-width: 420px) { .grid { grid-template-columns: minmax(0, 1fr); } }
+.card .head a.go { font-size: 12.5px; text-decoration: none; }
+.card .head a.go:hover { text-decoration: underline; }
+.plain td a { color: var(--ink); text-decoration: none; }
+.plain td a:hover { color: var(--accent-ink); text-decoration: underline; }
+.plain td.name { max-width: 0; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#servicesTable td.name, #errorsTable td.name { min-width: 140px; }
+.plain td { white-space: nowrap; }
+.share { display: block; height: 3px; border-radius: 2px; background: var(--grid); margin-top: 3px; overflow: hidden; }
+.share i { display: block; height: 100%; background: var(--accent); }
+.tablewrap { overflow-x: auto; }

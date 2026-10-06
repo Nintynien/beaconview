@@ -366,6 +366,52 @@ class Runner:
             "source": "rollup" if rollup else "raw",
         }
 
+    # -- /api/breakdown --------------------------------------------------
+    def breakdown(self, q, by, sort="requests", limit=20):
+        """One row per value of `by`: requests, 4xx, 5xx, bytes, p50/p95. From the rollups (percentiles from summed
+        histograms) when the field and filters allow, from raw rows otherwise. Sorted by requests, p95 or 5xx;
+        for the latter two the 200 busiest groups are ranked, so a group with three requests cannot top "slowest"
+        just by having one slow call."""
+        if by not in SPLITS:
+            raise BadQuery(f"by: unknown field {by!r}")
+        if sort not in ("requests", "p95", "errors"):
+            raise BadQuery("sort must be requests, p95 or errors")
+        limit = max(1, min(100, limit))
+        rollup = q.rollup_ok([by])
+        key = _key_expr(by, rollup)
+        w, p = where(q, rollup=rollup)
+        if rollup:
+            rows = self.run(
+                f"""SELECT {key} k, sum(requests)::BIGINT n,
+                           coalesce(sum(requests) FILTER (status BETWEEN 400 AND 499), 0)::BIGINT,
+                           coalesce(sum(requests) FILTER (status >= 500), 0)::BIGINT, sum(bytes)::BIGINT,
+                           max(duration_max_us), {", ".join(f"sum({c})::BIGINT" for c in HIST_COLUMNS)}
+                    FROM minute_stats WHERE {w} GROUP BY k ORDER BY n DESC, k LIMIT 200""", p)
+            groups = []
+            for r in rows:
+                p50, p95 = hist_quantiles(list(r[6:]), [0.5, 0.95], r[5])
+                groups.append((r[0], r[1], r[2], r[3], r[4], p50, p95))
+        else:
+            rows = self.run(
+                f"""SELECT {key} k, count(*) n, count(*) FILTER (status BETWEEN 400 AND 499),
+                           count(*) FILTER (status >= 500), sum(bytes)::BIGINT,
+                           approx_quantile(duration_us, [0.5, 0.95])
+                    FROM requests WHERE {w} GROUP BY k ORDER BY n DESC, k LIMIT 200""", p)
+            groups = [(r[0], r[1], r[2], r[3], r[4]) + (tuple(r[5]) if r[5] else (None, None)) for r in rows]
+        total = sum(g[1] for g in groups)
+        if sort == "p95":
+            groups.sort(key=lambda g: (g[6] is None, -(g[6] or 0)))
+        elif sort == "errors":
+            groups.sort(key=lambda g: (-g[3], -g[1]))
+        seconds = q.span_ms / 1000
+        return {
+            "by": by, "sort": sort, "source": "rollup" if rollup else "raw",
+            "rows": [{"value": g[0], "requests": int(g[1]), "rps": round(g[1] / seconds, 3),
+                      "share": round(g[1] / total, 4) if total else 0, "status_4xx": int(g[2]),
+                      "status_5xx": int(g[3]), "bytes": int(g[4] or 0), "p50_us": _round(g[5]),
+                      "p95_us": _round(g[6])} for g in groups[:limit]],
+        }
+
     # -- /api/logs -------------------------------------------------------
     def logs(self, q, limit=100, before=None, after_seq=None):
         """Newest first. `before` is a (ts_ms, seq) cursor from the previous page; `after_seq` returns only rows

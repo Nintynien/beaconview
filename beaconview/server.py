@@ -20,7 +20,7 @@ log = logging.getLogger("beaconview.http")
 
 STATS_CACHE_SECONDS = 10
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
-PAGES = {"/": "explore.html", "/explore": "explore.html"}     # "/" becomes the overview in milestone 3
+PAGES = {"/": "overview.html", "/explore": "explore.html"}
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; "
        "frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 
@@ -153,6 +153,10 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/series":
                 self.send_json(runner.series(q, buckets=_int(params, "buckets", 120),
                                              split=params.get("split", [None])[0] or None))
+            elif path == "/api/breakdown":
+                self.send_json(runner.breakdown(q, params.get("by", ["service"])[0],
+                                                sort=params.get("sort", ["requests"])[0],
+                                                limit=_int(params, "limit", 20)))
             elif path == "/api/top":
                 self.send_json(runner.top(q, params.get("field", ["path"])[0], limit=_int(params, "limit", 10)))
             elif path == "/api/logs":

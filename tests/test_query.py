@@ -174,3 +174,19 @@ def test_injection_stays_data(runner):
     assert count(runner, "h.X%22%29 OR 1%3D1 --=acme") == 0
     assert count(runner, "user_agent=%27 OR %271%27=%271") == 0
     assert count(runner, "") == 6
+
+
+def test_breakdown(runner):
+    b = runner.breakdown(q(), "host")
+    assert b["source"] == "rollup"
+    assert [(r["value"], r["requests"], r["status_4xx"], r["status_5xx"]) for r in b["rows"]] == [
+        ("a.com", 4, 0, 1), ("b.com", 2, 1, 0)]
+    assert b["rows"][0]["share"] == round(4 / 6, 4)
+    # the slow request's host ranks first by p95, and the raw path (path field) agrees on counts
+    assert runner.breakdown(q(), "host", sort="p95")["rows"][0]["value"] == "a.com"
+    raw = runner.breakdown(q(), "path", sort="errors")
+    assert raw["source"] == "raw" and raw["rows"][0]["value"] in ("/api/feed", "/missing")
+    assert raw["rows"][0]["status_5xx"] == 1
+    assert runner.breakdown(q(), "router")["rows"][-1]["value"] == "(none)"
+    with pytest.raises(query.BadQuery):
+        runner.breakdown(q(), "host", sort="vibes")

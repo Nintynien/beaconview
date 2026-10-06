@@ -127,6 +127,75 @@ window.BV = BV;
     return css("--s" + (this.byKey[key] || 1));
   };
 
+  /* ---------- time range ---------- */
+  // A range is {range: "1h"} (relative, slides with now) or {from, to} (absolute ms).
+  BV.PRESETS = [["15m", "Last 15 minutes", 15 * 60e3], ["1h", "Last hour", 3600e3], ["6h", "Last 6 hours", 6 * 3600e3],
+    ["24h", "Last 24 hours", 86400e3], ["7d", "Last 7 days", 7 * 86400e3], ["30d", "Last 30 days", 30 * 86400e3]];
+  function preset(key) { return BV.PRESETS.find(function (x) { return x[0] === key; }); }
+  BV.rangeFromUrl = function (p, fallback) {
+    var from = Number(p.get("from")), to = Number(p.get("to"));
+    if (p.get("range") && preset(p.get("range"))) return { range: p.get("range"), from: null, to: null };
+    if (from < to) return { range: null, from: from, to: to };
+    return { range: fallback || "1h", from: null, to: null };
+  };
+  BV.rangeToUrl = function (r, p) {
+    if (r.range) p.set("range", r.range); else { p.set("from", r.from); p.set("to", r.to); }
+  };
+  BV.rangeWindow = function (r) {
+    if (r.range) {
+      var now = Date.now();
+      return { from: now - (preset(r.range) || preset("1h"))[2], to: now };
+    }
+    return { from: r.from, to: r.to };
+  };
+  BV.rangeLabel = function (r) {
+    if (r.range) return (preset(r.range) || preset("1h"))[1];
+    var span = r.to - r.from;
+    return BV.when(r.from, span) + " – " + BV.when(r.to, span);
+  };
+  // Presets (longer than the retention window are left out) and a custom from/to; onPick gets the new range.
+  BV.buildRangeMenu = function (menu, r, retentionDays, onPick) {
+    BV.clear(menu);
+    var maxMs = retentionDays ? retentionDays * 86400e3 : Infinity;
+    BV.PRESETS.forEach(function (p) {
+      if (p[2] > maxMs * 1.01 && p[0] !== "1h") return;
+      menu.appendChild(BV.el("button", { class: "item", type: "button", onclick: function () {
+        BV.closeMenus(); onPick({ range: p[0], from: null, to: null });
+      } }, BV.el("span", { class: "check", text: r.range === p[0] ? "✓" : "" }), p[1]));
+    });
+    menu.appendChild(BV.el("hr"));
+    var w = BV.rangeWindow(r);
+    var toLocal = function (ms) { return new Date(ms - new Date(ms).getTimezoneOffset() * 60e3).toISOString().slice(0, 16); };
+    var fromIn = BV.el("input", { type: "datetime-local", value: toLocal(w.from) });
+    var toIn = BV.el("input", { type: "datetime-local", value: toLocal(w.to) });
+    menu.appendChild(BV.el("div", { class: "custom" },
+      BV.el("label", null, "From", fromIn), BV.el("label", null, "To", toIn),
+      BV.el("button", { class: "btn", type: "button", onclick: function () {
+        var f = new Date(fromIn.value).getTime(), t = new Date(toIn.value).getTime();
+        if (!(f < t)) return;
+        BV.closeMenus(); onPick({ range: null, from: f, to: t });
+      } }, "Apply custom range")));
+  };
+
+  /* ---------- popover menus ---------- */
+  var menus = [];
+  BV.menu = function (btn, menu, onOpen) {
+    menus.push([btn, menu]);
+    btn.addEventListener("click", function (ev) {
+      ev.stopPropagation();
+      var open = menu.hidden;
+      BV.closeMenus();
+      menu.hidden = !open;
+      btn.setAttribute("aria-expanded", String(open));
+      if (open && onOpen) onOpen();
+    });
+    menu.addEventListener("click", function (ev) { ev.stopPropagation(); });
+  };
+  BV.closeMenus = function () {
+    menus.forEach(function (m) { m[1].hidden = true; m[0].setAttribute("aria-expanded", "false"); });
+  };
+  document.addEventListener("click", function () { BV.closeMenus(); });
+
   /* ---------- theme ---------- */
   var THEMES = ["system", "light", "dark"];
   function storedTheme() { try { return localStorage.getItem("bv-theme") || "system"; } catch (e) { return "system"; } }
