@@ -104,7 +104,10 @@ def test_series_rollup_and_split(runner):
     by_class = runner.series(q(), buckets=60, split="status_class")
     got = {x["key"]: sum(x["values"]) for x in by_class["series"]}
     assert got == {"2xx": 3, "3xx": 1, "4xx": 1, "5xx": 1}
-    assert by_class["latency"]["p95_us"][5] >= 2_500_000               # the 3 s request's minute
+    lat = runner.series(q(), buckets=60, measure="latency")
+    assert lat["kind"] == "lines" and [x["key"] for x in lat["series"]] == ["p50", "p95", "p99"]
+    assert lat["series"][1]["values"][5] >= 2_500_000                  # the 3 s request's minute
+    assert lat["series"][0]["values"][2] is None                       # no requests: a gap, not zero
 
 
 def test_series_raw_split_top_and_other(runner):
@@ -190,3 +193,53 @@ def test_breakdown(runner):
     assert runner.breakdown(q(), "router")["rows"][-1]["value"] == "(none)"
     with pytest.raises(query.BadQuery):
         runner.breakdown(q(), "host", sort="vibes")
+
+
+def test_series_measures(runner):
+    by = runner.series(q(), buckets=60, measure="bytes", split="host")
+    assert by["unit"] == "bytes" and {x["key"] for x in by["series"]} == {"a.com", "b.com"}
+    assert sum(sum(x["values"]) for x in by["series"]) == runner.summary(q())["bytes"]
+    uniq = runner.series(q(), buckets=60, measure="unique_ips")
+    assert uniq["source"] == "raw" and uniq["series"][0]["values"][:6] == [1, 2, 0, 0, 0, 1]
+    err = runner.series(q(), buckets=60, measure="error_rate")
+    four, five = err["series"]
+    assert four["values"][1] == 50.0 and five["values"][5] == 100.0 and four["values"][2] is None
+    # the split only applies to requests and bytes
+    assert runner.series(q(), buckets=60, measure="latency", split="host")["split"] is None
+    with pytest.raises(query.BadQuery):
+        runner.series(q(), measure="vibes")
+
+
+def test_breakdown_totals_unique_and_sorts(runner):
+    total = runner.breakdown(q(), None, with_unique=True)
+    assert total["rows"] == [dict(total["rows"][0], value="(all)", requests=6, unique_ips=4)]
+    hosts = runner.breakdown(q(), "host", with_unique=True)
+    assert {r["value"]: r["unique_ips"] for r in hosts["rows"]} == {"a.com": 2, "b.com": 2}
+    by_ips = runner.breakdown(q(), "path", sort="unique_ips")
+    assert by_ips["rows"][0]["value"] == "/api/state" and by_ips["rows"][0]["unique_ips"] == 2
+    assert runner.breakdown(q(), "host", sort="status_4xx")["rows"][0]["value"] == "b.com"
+    assert runner.breakdown(q(), "host")["rows"][0]["unique_ips"] is None     # only computed when asked
+
+
+def test_logs_total(runner):
+    assert runner.logs(q(), limit=2)["total"] == 6
+    assert runner.logs(q("status=4xx"))["total"] == 1
+    assert runner.logs(q("path=/api/*"))["total"] == 5                         # raw filter: counted on raw rows
+    first = runner.logs(q(), limit=2)
+    assert runner.logs(q(), limit=2, before=tuple(first["next"]))["total"] is None
+
+
+def test_logs_page_newer_after_a_jump(runner):
+    # jump to just after minute 1 (rows 1-5 are at or before it), then page back up towards the newest
+    jumped = runner.logs(q(), limit=2, before=(T0 + 62_000, 10**15))
+    assert [r[0] for r in jumped["rows"]] == [5, 4]
+    top = jumped["rows"][0]
+    up = runner.logs(q(), limit=1, since=(top[2], top[0]))
+    assert [r[0] for r in up["rows"]] == [6] and up["newer"] is not None
+    last = runner.logs(q(), limit=1, since=tuple(up["newer"]))
+    assert last["rows"] == [] and last["newer"] is None                  # reached the newest
+    # a page that holds the rest comes back newest first, with no further cursor
+    rest = runner.logs(q(), limit=10, since=(T0, 0))
+    assert [r[0] for r in rest["rows"]] == [6, 5, 4, 3, 2, 1] and rest["newer"] is None
+    # filters apply
+    assert [r[0] for r in runner.logs(q("status=4xx"), since=(T0, 0))["rows"]] == [5]

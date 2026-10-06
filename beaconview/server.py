@@ -11,18 +11,66 @@ import os
 import sys
 import threading
 import time
+from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 from . import __version__, query
 
 log = logging.getLogger("beaconview.http")
 
 STATS_CACHE_SECONDS = 10
+ANSWER_CACHE_SECONDS = 5      # identical queries within this window share one answer (see AnswerCache)
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 PAGES = {"/": "overview.html", "/explore": "explore.html"}
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; "
        "frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+
+
+class AnswerCache:
+    """A short-lived cache of query answers, with single flight: identical requests arriving together run the
+    query once and share the result. Pages round relative ranges to 5 s, so every open tab watching "last hour"
+    asks the same question and ten tabs cost about what one does."""
+
+    def __init__(self, ttl=ANSWER_CACHE_SECONDS, size=256):
+        self.ttl, self.size = ttl, size
+        self.data = OrderedDict()       # key -> (stored at, answer)
+        self.inflight = {}              # key -> Event
+        self.lock = threading.Lock()
+        self.hits = self.misses = 0
+
+    def get(self, key, compute):
+        with self.lock:
+            hit = self.data.get(key)
+            if hit and time.monotonic() - hit[0] < self.ttl:
+                self.data.move_to_end(key)
+                self.hits += 1
+                return hit[1]
+            event = self.inflight.get(key)
+            owner = event is None
+            if owner:
+                event = self.inflight[key] = threading.Event()
+        if not owner:
+            event.wait(query.QUERY_TIMEOUT_SECONDS + 5)
+            with self.lock:
+                hit = self.data.get(key)
+                if hit:
+                    self.hits += 1
+                    return hit[1]
+            return compute()          # the first caller failed; answer (or fail) on our own
+        try:
+            answer = compute()
+            with self.lock:
+                self.misses += 1
+                self.data[key] = (time.monotonic(), answer)
+                self.data.move_to_end(key)
+                while len(self.data) > self.size:
+                    self.data.popitem(last=False)
+            return answer
+        finally:
+            with self.lock:
+                self.inflight.pop(key, None)
+            event.set()
 
 
 class App:
@@ -38,6 +86,7 @@ class App:
         self._stats_at = 0.0
         self._stats_lock = threading.Lock()
         self.runner = query.Runner(store)
+        self.answers = AnswerCache()
         self._static = {}
 
     def storage(self):
@@ -147,36 +196,39 @@ class Handler(BaseHTTPRequestHandler):
                 body["data"] = {"oldest_ms": st["oldest_ms"], "newest_ms": st["newest_ms"]}
                 self.send_json(body)
                 return
-            q = query.parse(params)
-            if path == "/api/summary":
-                self.send_json(runner.summary(q))
-            elif path == "/api/series":
-                self.send_json(runner.series(q, buckets=_int(params, "buckets", 120),
-                                             split=params.get("split", [None])[0] or None))
-            elif path == "/api/breakdown":
-                self.send_json(runner.breakdown(q, params.get("by", ["service"])[0],
-                                                sort=params.get("sort", ["requests"])[0],
-                                                limit=_int(params, "limit", 20)))
-            elif path == "/api/top":
-                self.send_json(runner.top(q, params.get("field", ["path"])[0], limit=_int(params, "limit", 10)))
-            elif path == "/api/logs":
-                before = params.get("before", [None])[0]
-                cursor = None
-                if before:
-                    try:
-                        ts_ms, seq = before.split(":")
-                        cursor = (int(ts_ms), int(seq))
-                    except ValueError:
-                        raise query.BadQuery("before must be <ts_ms>:<seq>") from None
-                after = params.get("after", [None])[0]
-                self.send_json(runner.logs(q, limit=_int(params, "limit", 100), before=cursor,
-                                           after_seq=int(after) if after and after.isdigit() else None))
-            else:
+            if path not in ("/api/summary", "/api/series", "/api/breakdown", "/api/top", "/api/logs"):
                 self.send_json({"error": "not found"}, 404)
+                return
+            q = query.parse(params)
+            compute = lambda: self.answer(path, q, params)   # noqa: E731
+            if "after" in params:
+                # following the log: each tab asks for its own newest rows, never worth caching
+                self.send_json(compute())
+            else:
+                key = path + "?" + urlencode(sorted((k, v) for k, vs in params.items() for v in vs))
+                self.send_json(self.app.answers.get(key, compute))
         except query.BadQuery as e:
             self.send_json({"error": str(e)}, 400)
         except query.QueryTimeout as e:
             self.send_json({"error": str(e)}, 504)
+
+    def answer(self, path, q, params):
+        runner = self.app.runner
+        if path == "/api/summary":
+            return runner.summary(q)
+        if path == "/api/series":
+            return runner.series(q, buckets=_int(params, "buckets", 120), split=params.get("split", [None])[0] or None,
+                                 measure=params.get("measure", ["requests"])[0])
+        if path == "/api/breakdown":
+            by = params.get("by", ["service"])[0]
+            return runner.breakdown(q, None if by in ("", "none") else by, sort=params.get("sort", ["requests"])[0],
+                                    limit=_int(params, "limit", 20), with_unique=params.get("unique", [""])[0] == "1")
+        if path == "/api/top":
+            return runner.top(q, params.get("field", ["path"])[0], limit=_int(params, "limit", 10))
+        after = params.get("after", [None])[0]
+        return runner.logs(q, limit=_int(params, "limit", 100), before=_cursor(params, "before"),
+                           after_seq=int(after) if after and after.isdigit() else None,
+                           since=_cursor(params, "since"))
 
     def send_static(self, name):
         hit = self.app.static_file(name)
@@ -222,6 +274,18 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     do_HEAD = do_GET
+
+
+def _cursor(params, name):
+    """A log position, `<ts_ms>:<seq>`, or None."""
+    raw = params.get(name, [None])[0]
+    if not raw:
+        return None
+    try:
+        ts_ms, seq = raw.split(":")
+        return int(ts_ms), int(seq)
+    except ValueError:
+        raise query.BadQuery(f"{name} must be <ts_ms>:<seq>") from None
 
 
 def _int(params, name, default):

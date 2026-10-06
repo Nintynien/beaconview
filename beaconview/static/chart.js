@@ -3,7 +3,9 @@
    Marks follow the data-viz spec: columns <= 24px with a 2px surface gap between stacked segments and neighbours,
    4px rounded data-end, 2px lines with a ringed end dot, hairline solid grid. Hover is a per-bucket band (columns) or
    crosshair (lines) with one tooltip listing every series; arrow keys step through buckets when the chart has focus;
-   dragging across the plot zooms to that range. Every value is also in the table view. */
+   dragging across the plot zooms to that range, a click (or Enter on a focused bucket) calls onClick(bucket).
+   mark(i) highlights a bucket from outside, without a tooltip (a hovered log row showing where it sits). Every value
+   is also in the table view. */
 "use strict";
 (function () {
   var el = BV.el;
@@ -30,7 +32,7 @@
   }
 
   BV.chart = function (container, opts) {
-    var state = { opts: opts, hover: -1, drag: null };
+    var state = { opts: opts, hover: -1, marked: -1, drag: null };
     var tip = el("div", { class: "tip", hidden: true, role: "status" });
     container.classList.add("chart");
     container.setAttribute("tabindex", "0");
@@ -39,6 +41,8 @@
     var geo = null;
 
     function render() {
+      // hidden (a display:none panel reports width 0): keep the last drawing; the resize observer redraws on show
+      if (!container.clientWidth) return;
       var o = state.opts;
       var W = Math.max(200, container.clientWidth);
       var H = o.height || 200;
@@ -139,13 +143,16 @@
       geo.band = band; geo.cross = cross; geo.dots = dots; geo.sel = sel;
       BV.clear(svgHolder).appendChild(svg);
       if (state.hover >= 0) show(state.hover);
+      else if (state.marked >= 0) show(state.marked, true);
     }
 
-    function show(i) {
+    function show(i, quiet) {
       var o = state.opts;
       if (!geo || i < 0 || i >= o.n) return hide();
-      state.hover = i;
+      if (!quiet) state.hover = i;
       var cx = geo.L + (i + 0.5) * geo.slot;
+      geo.band.setAttribute("class", "hover-band" + (quiet ? " marked" : ""));
+      geo.cross.setAttribute("class", "crosshair" + (quiet ? " marked" : ""));
       if (o.kind === "columns") {
         geo.band.setAttribute("x", geo.L + i * geo.slot);
         geo.band.setAttribute("width", Math.max(1, geo.slot));
@@ -161,6 +168,7 @@
           geo.dots.appendChild(el("svg:circle", { cx: cx, cy: geo.y(v), r: 4, fill: s.color, stroke: "var(--surface)", "stroke-width": 2 }));
         });
       }
+      if (quiet) { tip.hidden = true; return; }
       var t0 = o.start + i * o.step, span = o.n * o.step;
       BV.clear(tip);
       tip.appendChild(el("div", { class: "when", text: BV.when(t0, span) + " – " + BV.when(t0 + o.step, span) }));
@@ -188,6 +196,7 @@
       state.hover = -1;
       tip.hidden = true;
       if (!geo) return;
+      if (state.marked >= 0) { show(state.marked, true); return; }
       geo.band.setAttribute("visibility", "hidden");
       geo.cross.setAttribute("visibility", "hidden");
       BV.clear(geo.dots);
@@ -212,7 +221,7 @@
     });
     container.addEventListener("pointerleave", function () { if (!state.drag) hide(); });
     container.addEventListener("pointerdown", function (ev) {
-      if (!geo || !state.opts.onZoom || ev.button !== 0 || ev.pointerType === "touch") return;
+      if (!geo || !(state.opts.onZoom || state.opts.onClick) || ev.button !== 0) return;
       var r = container.getBoundingClientRect();
       state.drag = { x: Math.max(geo.L, Math.min(geo.L + geo.pw, ev.clientX - r.left)) };
       container.setPointerCapture(ev.pointerId);
@@ -224,9 +233,13 @@
       var a = Math.min(state.drag.x, x), b = Math.max(state.drag.x, x);
       state.drag = null;
       geo.sel.setAttribute("visibility", "hidden");
-      if (b - a > 6) {
-        var o = state.opts, toT = function (px) { return o.start + (px - geo.L) / geo.slot * o.step; };
+      var o = state.opts;
+      if (b - a > 6 && o.onZoom && ev.pointerType !== "touch") {
+        var toT = function (px) { return o.start + (px - geo.L) / geo.slot * o.step; };
         o.onZoom(Math.round(toT(a)), Math.round(toT(b)));
+      } else if (b - a <= 6 && o.onClick) {
+        var i = Math.floor((x - geo.L) / geo.slot);
+        if (i >= 0 && i < o.n) o.onClick(i);
       }
     });
     container.addEventListener("keydown", function (ev) {
@@ -235,6 +248,8 @@
           : state.hover + (ev.key === "ArrowRight" ? 1 : -1);
         show(Math.max(0, Math.min(state.opts.n - 1, i)));
         ev.preventDefault();
+      } else if (ev.key === "Enter" && state.hover >= 0 && state.opts.onClick) {
+        state.opts.onClick(state.hover);
       } else if (ev.key === "Escape") hide();
     });
     container.addEventListener("blur", hide);
@@ -243,7 +258,12 @@
     ro.observe(container);
     render();
     return {
-      update: function (next) { state.opts = next; render(); },
+      update: function (next) { state.opts = next; state.marked = -1; render(); },
+      mark: function (i) {
+        state.marked = i === undefined || i === null ? -1 : i;
+        if (state.hover >= 0) return;               // the pointer's own hover wins
+        if (state.marked >= 0) show(state.marked, true); else hide();
+      },
       width: function () { return geo ? geo.pw : container.clientWidth; },
     };
   };

@@ -1,13 +1,18 @@
 /* Overview: the whole proxy at a glance for a time range (and optionally one instance). Every row links into Explore
    with that value as a filter and the same range, so the overview is where a question starts, Explore where it is
-   answered. Relative ranges refresh themselves every minute while the tab is visible. */
+   answered.
+
+   Live (on by default for the preset ranges) keeps the page current in two tiers: what the per-minute rollups
+   answer (chart, traffic table, status codes, hosts, recent 5xx) refreshes often; what scans raw rows (tiles with
+   unique IPs, top paths, IPs, user agents) refreshes at a rate that falls with the range. Updates land in place, and
+   nothing refreshes while the tab is hidden. */
 "use strict";
 (function () {
   var el = BV.el, $ = BV.$;
-  var REFRESH_MS = 60000;
   var meta = null;
-  var state = { range: "24h", from: null, to: null, instance: null, by: "router", sort: "requests" };
-  var chart = null, chartOpts = null, timer = null;
+  var state = { range: "24h", from: null, to: null, instance: null, by: "router", sort: "requests", live: true };
+  var chart = null, chartOpts = null, timers = {};
+  var seenErrors = null;            // seq numbers in the recent-5xx table, to mark the rows that arrive live
   var inflight = {}, errors = {};
 
   /* ---------- URL ---------- */
@@ -18,6 +23,7 @@
     state.instance = p.get("instance");
     state.by = p.get("by") || "router";
     state.sort = p.get("sort") || "requests";
+    state.live = !!state.range && p.get("live") !== "0";
   }
   function writeUrl(push) {
     var p = new URLSearchParams();
@@ -25,6 +31,7 @@
     if (state.instance) p.set("instance", state.instance);
     if (state.by !== "router") p.set("by", state.by);
     if (state.sort !== "requests") p.set("sort", state.sort);
+    if (state.range && !state.live) p.set("live", "0");
     var url = location.pathname + "?" + p.toString();
     if (push) history.pushState(null, "", url); else history.replaceState(null, "", url);
   }
@@ -49,11 +56,14 @@
   }
 
   /* ---------- fetching ---------- */
-  function load(name, card, path, p, onData) {
-    if (inflight[name]) inflight[name].abort();
+  function load(name, card, path, p, onData, quiet) {
+    if (inflight[name]) {
+      if (quiet) return;            // a live refresh never interrupts a load already on its way
+      inflight[name].abort();
+    }
     var ctl = new AbortController();
     inflight[name] = ctl;
-    if (card) card.classList.add("loading");
+    if (card && !quiet) card.classList.add("loading");
     return BV.api(path, p, ctl.signal).then(function (d) {
       if (inflight[name] !== ctl) return;
       inflight[name] = null;
@@ -72,35 +82,6 @@
     msgs = msgs.filter(function (m, i) { return msgs.indexOf(m) === i; });
     $("banner").hidden = !msgs.length;
     $("banner").textContent = msgs.join(" · ");
-  }
-
-  /* ---------- status strip ---------- */
-  function loadStrip() {
-    BV.api("/api/status").then(function (s) {
-      var ing = s.ingest, st = s.storage;
-      var bad = ing.sources.reduce(function (a, x) { return a + x.bad_lines; }, 0);
-      var unread = ing.sources.reduce(function (a, x) { return a + (x.unread_bytes || 0); }, 0);
-      var errs = ing.sources.filter(function (x) { return x.error; });
-      var ok = ing.alive && !errs.length;
-      var box = BV.clear($("strip"));
-      var item = function () {
-        var span = el("span", { class: "it" });
-        for (var i = 0; i < arguments.length; i++) BV.append(span, arguments[i]);
-        box.appendChild(span);
-      };
-      item(el("span", { class: "dot " + (ok ? "good" : "bad") }),
-        el("b", { text: !ing.alive ? "Ingest stopped" : errs.length ? "Can't read a log" : unread > 1e6 ? "Catching up" : "Ingesting" }),
-        ing.newest_ms ? " · newest request " + BV.ago(ing.newest_ms) : " · no requests yet");
-      if (errs.length) item(el("span", { text: errs[0].path + ": " + errs[0].error }));
-      item(el("b", { text: BV.compact(ing.rows_per_sec) }), " req/s ingested");
-      if (unread > 1e6) item(el("b", { text: BV.bytes(unread) }), " behind");
-      item(el("b", { text: BV.int(bad) }), bad === 1 ? " unreadable line" : " unreadable lines");
-      item(el("b", { text: BV.compact(st.rows) }), " requests stored · ", el("b", { text: BV.bytes(st.db_bytes) }));
-      if (st.oldest_ms) item("since ", el("b", { text: BV.day(st.oldest_ms) }), " · keeping " + s.retention.raw_days + " days");
-      if (ing.sources.length > 1) item(el("b", { text: String(ing.sources.length) }), " logs");
-    }).catch(function () {
-      BV.clear($("strip")).appendChild(el("span", { class: "it" }, el("span", { class: "dot bad" }), "Status unavailable"));
-    });
   }
 
   /* ---------- tiles ---------- */
@@ -122,10 +103,10 @@
     text = (dir > 0 ? "▲ " : "▼ ") + (Math.abs(pct) >= 100 ? Math.round(Math.abs(pct)) : Math.abs(pct).toFixed(1)) + "%";
     return { text: text, cls: kind === "bad-up" ? (dir > 0 ? "bad" : "good") : "" };
   }
-  function loadTiles() {
+  function loadTiles(quiet) {
     var w = win(), span = w.to - w.from;
     var prevW = { from: w.from - span, to: w.from };
-    $("tiles").classList.add("loading");
+    if (!quiet) $("tiles").classList.add("loading");
     Promise.all([BV.api("/api/summary", params(null, w)), BV.api("/api/summary", params(null, prevW))]).then(function (r) {
       $("tiles").classList.remove("loading");
       var s = r[0], p = r[1];
@@ -152,7 +133,7 @@
   }
 
   /* ---------- chart ---------- */
-  function loadSeries() {
+  function loadSeries(quiet) {
     var width = chart ? chart.width() : $("seriesChart").clientWidth - 60;
     var buckets = Math.max(20, Math.min(240, Math.floor(width / 7)));
     load("series", $("seriesCard"), "/api/series", params({ buckets: buckets, split: "status_class" }), function (d) {
@@ -161,13 +142,13 @@
       });
       chartOpts = { kind: "columns", start: d.start, step: d.step, n: d.buckets, series: series, height: 220,
         label: "Requests over time by status class", onZoom: function (f, t) {
-          state.range = null; state.from = f; state.to = t; writeUrl(true); reloadAll();
+          state.range = null; state.from = f; state.to = t; state.live = false; writeUrl(true); reloadAll();
         } };
       $("seriesSub").textContent = "per " + BV.span(d.step).replace(/^1 /, "") + " · " + BV.rangeLabel(state);
       BV.legend($("seriesLegend"), series, "columns");
       if (chart) chart.update(chartOpts); else chart = BV.chart($("seriesChart"), chartOpts);
       if (!$("seriesTable").hidden) BV.chartTable($("seriesTable"), chartOpts);
-    });
+    }, quiet);
   }
 
   /* ---------- tables ---------- */
@@ -175,7 +156,7 @@
   function shareCell(share) {
     return el("span", { class: "share" }, el("i", { style: "width:" + Math.max(1, Math.round(share * 100)) + "%" }));
   }
-  function loadBreakdown() {
+  function loadBreakdown(quiet) {
     load("breakdown", $("servicesCard"), "/api/breakdown", params({ by: state.by, sort: state.sort, limit: 15 }), function (b) {
       var t = BV.clear($("servicesTable"));
       t.appendChild(el("thead", null, el("tr", null,
@@ -199,14 +180,14 @@
           el("td", { class: "num", text: BV.bytes(r.bytes) })));
       });
       t.appendChild(body);
-    });
+    }, quiet);
   }
-  function loadTop(field, table, card, label) {
+  function loadTop(field, table, card, quiet) {
     load("top-" + field, card, "/api/top", params({ field: field, limit: 8 }), function (d) {
       var t = BV.clear(table), body = el("tbody");
       if (!d.values.length) body.appendChild(el("tr", null, el("td", { class: "hint", text: "No requests in this range." })));
       d.values.forEach(function (v) {
-        var name = label ? label(v.value) : v.value;
+        var name = v.value;
         var cell = el("td", { class: "name" + (field === "user_agent" ? "" : " mono") });
         if (field === "status") {
           cell.appendChild(el("span", { class: "status" }, el("i", { style: "background:" + BV.statusColorVar(Number(v.value)) }),
@@ -223,10 +204,13 @@
         t.appendChild(el("tfoot", null, el("tr", null, el("td", { colspan: 3, class: "hint",
           text: "≈ " + BV.int(d.distinct) + " distinct" }))));
       }
-    });
+    }, quiet);
   }
-  function loadErrors() {
+  function loadErrors(quiet) {
     load("errors", $("errorsCard"), "/api/logs", params({ status: "5xx", limit: 10 }), function (d) {
+      var seqs = d.rows.map(function (r) { return r[d.columns.indexOf("seq")]; });
+      var before = seenErrors;
+      seenErrors = seqs;
       var col = function (r, name) { return r[d.columns.indexOf(name)]; };
       var w = win(), multiDay = new Date(w.from).toDateString() !== new Date(w.to).toDateString();
       var t = BV.clear($("errorsTable"));
@@ -237,7 +221,8 @@
       if (!d.rows.length) body.appendChild(el("tr", null, el("td", { colspan: 7, class: "hint", text: "No server errors in this range." })));
       d.rows.forEach(function (r) {
         var path = col(r, "path") || "";
-        body.appendChild(el("tr", null,
+        var fresh = before && before.indexOf(col(r, "seq")) < 0;
+        body.appendChild(el("tr", { class: fresh ? "fresh" : null },
           el("td", { class: "mono", text: BV.stamp(col(r, "ts"), multiDay) }),
           el("td", null, el("span", { class: "status" }, el("i", { style: "background:" + BV.statusColorVar(col(r, "status")) }), String(col(r, "status")))),
           el("td", { text: col(r, "host") || "–" }),
@@ -247,7 +232,7 @@
           el("td", { class: "num", text: BV.dur(col(r, "duration_us")) })));
       });
       t.appendChild(body);
-    });
+    }, quiet);
     $("errorsLink").href = exploreUrl([["status", "5xx"]]);
   }
 
@@ -256,6 +241,7 @@
     $("rangeBtn").textContent = "◷ " + BV.rangeLabel(state);
     BV.buildRangeMenu($("rangeMenu"), state, meta && meta.retention.raw_days, function (r) {
       state.range = r.range; state.from = r.from; state.to = r.to;
+      state.live = !!r.range;
       writeUrl(true); reloadAll();
     });
     $("byRouter").value = state.by;
@@ -264,20 +250,45 @@
     document.querySelectorAll("a.go[data-top]").forEach(function (a) {
       a.href = exploreUrl([], { top: a.getAttribute("data-top") });
     });
-    loadStrip(); loadTiles(); loadSeries(); loadBreakdown();
-    loadTop("status", $("statusTable"), $("statusCard"));
-    loadTop("path", $("pathsTable"), $("pathsCard"));
-    loadTop("ip", $("ipsTable"), $("ipsCard"));
-    loadTop("user_agent", $("uasTable"), $("uasCard"));
-    loadTop("host", $("hostsTable"), $("hostsCard"));
-    loadErrors();
-    clearInterval(timer);
-    if (state.range) timer = setInterval(function () { if (!document.hidden) reloadAll(); }, REFRESH_MS);
+    $("liveBtn").setAttribute("aria-pressed", String(state.live));
+    $("liveDot").className = "dot" + (state.live ? " live" : "");
+    $("liveBtn").title = state.range ? "Keep this page up to date" : "Live follows the latest data: switches to the last hour";
+    seenErrors = null;
+    refreshFast(false);
+    refreshSlow(false);
+    schedule();
+  }
+  // what the rollups answer: cheap at any range
+  function refreshFast(quiet) {
+    loadSeries(quiet); loadBreakdown(quiet);
+    loadTop("status", $("statusTable"), $("statusCard"), quiet);
+    loadTop("host", $("hostsTable"), $("hostsCard"), quiet);
+    loadErrors(quiet);
+  }
+  // what scans raw rows: unique IPs in the tiles, the raw-field top lists
+  function refreshSlow(quiet) {
+    loadTiles(quiet);
+    loadTop("path", $("pathsTable"), $("pathsCard"), quiet);
+    loadTop("ip", $("ipsTable"), $("ipsCard"), quiet);
+    loadTop("user_agent", $("uasTable"), $("uasCard"), quiet);
+  }
+  function intervals() {
+    var w = win(), span = w.to - w.from;
+    if (span <= 3600e3) return { fast: 10e3, slow: 10e3 };
+    if (span <= 86400e3) return { fast: 15e3, slow: 30e3 };
+    return { fast: 30e3, slow: 60e3 };
+  }
+  function schedule() {
+    clearInterval(timers.fast); clearInterval(timers.slow);
+    if (!state.live || !state.range) return;
+    var iv = intervals();
+    timers.fast = setInterval(function () { if (!document.hidden) refreshFast(true); }, iv.fast);
+    timers.slow = setInterval(function () { if (!document.hidden) refreshSlow(true); }, iv.slow);
   }
 
   function init() {
     BV.initTheme($("themeBtn"), function () { if (chartOpts) loadSeries(); });
-    BV.initIngestStatus($("ingestDot"), $("ingestText"));
+    BV.initIngestStatus($("ingestDot"), $("ingestText"), $("statusBanner"));
     BV.menu($("rangeBtn"), $("rangeMenu"));
     document.addEventListener("keydown", function (ev) { if (ev.key === "Escape") BV.closeMenus(); });
     readUrl();
@@ -296,6 +307,15 @@
     $("byRouter").addEventListener("change", function () { state.by = this.value; writeUrl(false); loadBreakdown(); });
     $("bySort").addEventListener("change", function () { state.sort = this.value; writeUrl(false); loadBreakdown(); });
     $("refreshBtn").addEventListener("click", reloadAll);
+    $("liveBtn").addEventListener("click", function () {
+      state.live = !state.live;
+      if (state.live && !state.range) { state.range = "1h"; state.from = state.to = null; }
+      writeUrl(false);
+      reloadAll();
+    });
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden && state.live && state.range) { refreshFast(true); refreshSlow(true); }
+    });
     $("seriesTableBtn").addEventListener("click", function () {
       var on = this.getAttribute("aria-pressed") !== "true";
       this.setAttribute("aria-pressed", String(on));

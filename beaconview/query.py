@@ -27,6 +27,9 @@ SPLIT_TOP = 5
 OTHER = "Other"
 STEPS_S = (1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400)
 EXACT_UNIQUE_MAX_MS = 86_400_000      # longer ranges count unique IPs approximately (HyperLogLog)
+# what /api/series can chart; requests and bytes stack by a split, the rest are one measure per bucket
+MEASURES = ("requests", "bytes", "latency", "unique_ips", "error_rate")
+BREAKDOWN_SORTS = ("requests", "unique_ips", "status_4xx", "status_5xx", "errors", "p50", "p95", "bytes")
 
 # name -> (kind, raw column, rollup column or None, label)
 FIELDS = {
@@ -281,70 +284,105 @@ class Runner:
         }
 
     # -- /api/series -----------------------------------------------------
-    def series(self, q, buckets=120, split=None):
+    def series(self, q, buckets=120, split=None, measure="requests"):
+        """One measure over time, in buckets sized so ~`buckets` cover the range.
+
+        requests / bytes: columns, optionally split by a field (top 5 + Other); latency: p50/p95/p99 lines (from the
+        rollup histograms when filters allow); unique_ips: distinct client IPs per bucket (raw rows; approximate past
+        24 h); error_rate: 4xx and 5xx as a percentage of each bucket's requests."""
+        if measure not in MEASURES:
+            raise BadQuery(f"measure must be one of {', '.join(MEASURES)}")
         if split is not None and split not in SPLITS:
             raise BadQuery(f"split: unknown field {split!r}")
+        if measure not in ("requests", "bytes"):
+            split = None
         buckets = max(10, min(MAX_BUCKETS, buckets))
         step_s = next((s for s in STEPS_S if s * buckets * 1000 >= q.span_ms), STEPS_S[-1])
         step = step_s * 1000
-        rollup = step >= 60_000 and q.rollup_ok([split] if split else [])
+        rollup = (measure != "unique_ips" and step >= 60_000 and q.rollup_ok([split] if split else []))
         start = q.from_ms // step * step
         n = -(-(q.to_ms - start) // step)
-        ts_expr = "epoch_ms(minute)" if rollup else "epoch_ms(ts)"
-        bucket = f"({ts_expr} // {step}) * {step}"
-        count_expr = "sum(requests)" if rollup else "count(*)"
+        bucket = f"(({'epoch_ms(minute)' if rollup else 'epoch_ms(ts)'}) // {step}) * {step}"
         table = "minute_stats" if rollup else "requests"
         w, p = where(q, rollup=rollup)
+        out = {"from": q.from_ms, "to": q.to_ms, "start": start, "step": step, "buckets": n, "split": split,
+               "measure": measure, "source": "rollup" if rollup else "raw"}
 
-        keys = []
-        if split:
-            key = _key_expr(split, rollup)
-            top = self.run(f"SELECT {key} k, {count_expr} n FROM {table} WHERE {w} GROUP BY k ORDER BY n DESC, k "
-                           f"LIMIT {SPLIT_TOP + 1}", p)
-            keys = [r[0] for r in top[:SPLIT_TOP]]
-            has_other = len(top) > SPLIT_TOP
-            if keys:
-                in_list = ", ".join("?" for _ in keys)
-                key_sql = f"CASE WHEN {key} IN ({in_list}) THEN {key} ELSE '{OTHER}' END"
-                params = list(keys) + p
-            else:
-                key_sql, params = "'all'", p
-            rows = self.run(f"SELECT {bucket} b, {key_sql} k, {count_expr} FROM {table} WHERE {w} GROUP BY ALL",
-                            params)
-            names = keys + ([OTHER] if has_other else [])
-        else:
-            rows = [(b, "all", c) for b, c in self.run(
-                f"SELECT {bucket} b, {count_expr} FROM {table} WHERE {w} GROUP BY ALL", p)]
-            names = ["all"]
-        index = {name: i for i, name in enumerate(names)}
-        values = [[0] * n for _ in names]
-        for b, k, c in rows:
+        def at(b):
             i = (b - start) // step
-            if 0 <= i < n and k in index:
-                values[index[k]][i] = int(c)
+            return i if 0 <= i < n else None
 
-        p50 = [None] * n
-        p95 = [None] * n
-        if rollup:
-            hist = self.run(f"SELECT {bucket} b, max(duration_max_us), "
-                            f"{', '.join(f'sum({c})::BIGINT' for c in HIST_COLUMNS)} "
-                            f"FROM minute_stats WHERE {w} GROUP BY ALL", p)
-            for row in hist:
-                i = (row[0] - start) // step
-                if 0 <= i < n:
-                    p50[i], p95[i] = hist_quantiles(list(row[2:]), [0.5, 0.95], row[1])
-        else:
-            for b, quants in self.run(f"SELECT {bucket} b, approx_quantile(duration_us, [0.5, 0.95]) "
-                                      f"FROM requests WHERE {w} GROUP BY ALL", p):
-                i = (b - start) // step
-                if 0 <= i < n and quants:
-                    p50[i], p95[i] = quants
-        return {
-            "from": q.from_ms, "to": q.to_ms, "start": start, "step": step, "buckets": n, "split": split,
-            "series": [{"key": name, "values": values[i]} for i, name in enumerate(names)],
-            "latency": {"p50_us": [_round(v) for v in p50], "p95_us": [_round(v) for v in p95]},
-            "source": "rollup" if rollup else "raw",
-        }
+        if measure in ("requests", "bytes"):
+            val = ("sum(requests)" if rollup else "count(*)") if measure == "requests" else "sum(bytes)"
+            names = ["all"]
+            if split:
+                key = _key_expr(split, rollup)
+                top = self.run(f"SELECT {key} k, {val} n FROM {table} WHERE {w} GROUP BY k ORDER BY n DESC NULLS LAST, k "
+                               f"LIMIT {SPLIT_TOP + 1}", p)
+                keys = [r[0] for r in top[:SPLIT_TOP]]
+                if split == "status_class":
+                    keys.sort()                  # 2xx, 3xx, 4xx, 5xx: the stack reads the same way every time
+                if keys:
+                    key_sql = f"CASE WHEN {key} IN ({', '.join('?' for _ in keys)}) THEN {key} ELSE '{OTHER}' END"
+                    rows = self.run(f"SELECT {bucket} b, {key_sql} k, {val} FROM {table} WHERE {w} GROUP BY ALL",
+                                    list(keys) + p)
+                    names = keys + ([OTHER] if len(top) > SPLIT_TOP else [])
+                else:
+                    rows = []
+            else:
+                rows = [(b, "all", c) for b, c in self.run(f"SELECT {bucket} b, {val} FROM {table} WHERE {w} GROUP BY ALL", p)]
+            index = {name: i for i, name in enumerate(names)}
+            values = [[0] * n for _ in names]
+            for b, k, c in rows:
+                i = at(b)
+                if i is not None and k in index:
+                    values[index[k]][i] = int(c or 0)
+            out.update(kind="columns", unit="bytes" if measure == "bytes" else "count",
+                       series=[{"key": name, "values": values[i]} for i, name in enumerate(names)])
+
+        elif measure == "latency":
+            qs = [[None] * n for _ in range(3)]
+            if rollup:
+                for row in self.run(f"SELECT {bucket} b, max(duration_max_us), "
+                                    f"{', '.join(f'sum({c})::BIGINT' for c in HIST_COLUMNS)} "
+                                    f"FROM minute_stats WHERE {w} GROUP BY ALL", p):
+                    i = at(row[0])
+                    if i is not None:
+                        for j, v in enumerate(hist_quantiles(list(row[2:]), [0.5, 0.95, 0.99], row[1])):
+                            qs[j][i] = _round(v)
+            else:
+                for b, quants in self.run(f"SELECT {bucket} b, approx_quantile(duration_us, [0.5, 0.95, 0.99]) "
+                                          f"FROM requests WHERE {w} GROUP BY ALL", p):
+                    i = at(b)
+                    if i is not None and quants:
+                        for j, v in enumerate(quants):
+                            qs[j][i] = _round(v)
+            out.update(kind="lines", unit="us",
+                       series=[{"key": k, "values": qs[j]} for j, k in enumerate(("p50", "p95", "p99"))])
+
+        elif measure == "unique_ips":
+            approx = q.span_ms > EXACT_UNIQUE_MAX_MS
+            values = [0] * n
+            for b, c in self.run(f"SELECT {bucket} b, {'approx_count_distinct(ip)' if approx else 'count(DISTINCT ip)'} "
+                                 f"FROM requests WHERE {w} GROUP BY ALL", p):
+                i = at(b)
+                if i is not None:
+                    values[i] = int(c)
+            out.update(kind="columns", unit="count", approx=approx, series=[{"key": "unique IPs", "values": values}])
+
+        else:   # error_rate
+            count = "sum(requests)" if rollup else "count(*)"
+            c4, c5 = [None] * n, [None] * n
+            for b, total, e4, e5 in self.run(
+                    f"""SELECT {bucket} b, {count}, coalesce({count} FILTER (status BETWEEN 400 AND 499), 0),
+                               coalesce({count} FILTER (status >= 500), 0)
+                        FROM {table} WHERE {w} GROUP BY ALL""", p):
+                i = at(b)
+                if i is not None and total:
+                    c4[i] = round(e4 / total * 100, 2)
+                    c5[i] = round(e5 / total * 100, 2)
+            out.update(kind="lines", unit="percent", series=[{"key": "4xx", "values": c4}, {"key": "5xx", "values": c5}])
+        return out
 
     # -- /api/top --------------------------------------------------------
     def top(self, q, field, limit=10):
@@ -367,18 +405,19 @@ class Runner:
         }
 
     # -- /api/breakdown --------------------------------------------------
-    def breakdown(self, q, by, sort="requests", limit=20):
-        """One row per value of `by`: requests, 4xx, 5xx, bytes, p50/p95. From the rollups (percentiles from summed
-        histograms) when the field and filters allow, from raw rows otherwise. Sorted by requests, p95 or 5xx;
-        for the latter two the 200 busiest groups are ranked, so a group with three requests cannot top "slowest"
-        just by having one slow call."""
-        if by not in SPLITS:
+    def breakdown(self, q, by, sort="requests", limit=20, with_unique=False):
+        """One row per value of `by` (None: a single row of totals): requests, req/s, 4xx, 5xx, bytes, p50/p95, and
+        with `with_unique` distinct client IPs. From the rollups (percentiles from summed histograms) when the
+        field and filters allow, from raw rows otherwise; unique IPs always read raw rows, but only for the groups
+        returned (or, to sort by them, the 200 busiest). Sorting by p95 or errors also ranks just the 200 busiest
+        groups, so a group with three requests cannot top "slowest" with one slow call."""
+        if by is not None and by not in SPLITS:
             raise BadQuery(f"by: unknown field {by!r}")
-        if sort not in ("requests", "p95", "errors"):
-            raise BadQuery("sort must be requests, p95 or errors")
+        if sort not in BREAKDOWN_SORTS:
+            raise BadQuery(f"sort must be one of {', '.join(BREAKDOWN_SORTS)}")
         limit = max(1, min(100, limit))
-        rollup = q.rollup_ok([by])
-        key = _key_expr(by, rollup)
+        rollup = q.rollup_ok([by] if by else [])
+        key = _key_expr(by, rollup) if by else "'(all)'"
         w, p = where(q, rollup=rollup)
         if rollup:
             rows = self.run(
@@ -390,35 +429,66 @@ class Runner:
             groups = []
             for r in rows:
                 p50, p95 = hist_quantiles(list(r[6:]), [0.5, 0.95], r[5])
-                groups.append((r[0], r[1], r[2], r[3], r[4], p50, p95))
+                groups.append([r[0], r[1], r[2], r[3], r[4], p50, p95, None])
         else:
             rows = self.run(
                 f"""SELECT {key} k, count(*) n, count(*) FILTER (status BETWEEN 400 AND 499),
                            count(*) FILTER (status >= 500), sum(bytes)::BIGINT,
                            approx_quantile(duration_us, [0.5, 0.95])
                     FROM requests WHERE {w} GROUP BY k ORDER BY n DESC, k LIMIT 200""", p)
-            groups = [(r[0], r[1], r[2], r[3], r[4]) + (tuple(r[5]) if r[5] else (None, None)) for r in rows]
+            groups = [[r[0], r[1], r[2], r[3], r[4]] + (list(r[5]) if r[5] else [None, None]) + [None] for r in rows]
+        groups = [g for g in groups if g[1]]
         total = sum(g[1] for g in groups)
-        if sort == "p95":
-            groups.sort(key=lambda g: (g[6] is None, -(g[6] or 0)))
-        elif sort == "errors":
-            groups.sort(key=lambda g: (-g[3], -g[1]))
+        approx = q.span_ms > EXACT_UNIQUE_MAX_MS
+
+        def add_unique(chosen):
+            if not chosen:
+                return
+            rw, rp = where(q)
+            distinct = "approx_count_distinct(ip)" if approx else "count(DISTINCT ip)"
+            if by:
+                raw_key = _key_expr(by, False)
+                keys = [g[0] for g in chosen]
+                found = dict(self.run(
+                    f"SELECT {raw_key} k, {distinct} FROM requests WHERE {rw} AND {raw_key} IN "
+                    f"({', '.join('?' for _ in keys)}) GROUP BY k", rp + keys))
+            else:
+                found = {"(all)": self.run(f"SELECT {distinct} FROM requests WHERE {rw}", rp)[0][0]}
+            for g in chosen:
+                g[7] = int(found.get(g[0]) or 0)
+
+        if sort == "unique_ips":
+            add_unique(groups)
+        order = {
+            "requests": lambda g: -g[1], "status_4xx": lambda g: (-g[2], -g[1]),
+            "status_5xx": lambda g: (-g[3], -g[1]), "errors": lambda g: (-g[3], -g[1]),
+            "bytes": lambda g: -(g[4] or 0), "unique_ips": lambda g: -(g[7] or 0),
+            "p50": lambda g: (g[5] is None, -(g[5] or 0)), "p95": lambda g: (g[6] is None, -(g[6] or 0)),
+        }[sort]
+        groups.sort(key=order)
+        groups = groups[:limit]
+        if with_unique and sort != "unique_ips":
+            add_unique(groups)
         seconds = q.span_ms / 1000
         return {
-            "by": by, "sort": sort, "source": "rollup" if rollup else "raw",
+            "by": by, "sort": sort, "source": "rollup" if rollup else "raw", "total": int(total),
+            "unique_ips_approx": approx,
             "rows": [{"value": g[0], "requests": int(g[1]), "rps": round(g[1] / seconds, 3),
                       "share": round(g[1] / total, 4) if total else 0, "status_4xx": int(g[2]),
                       "status_5xx": int(g[3]), "bytes": int(g[4] or 0), "p50_us": _round(g[5]),
-                      "p95_us": _round(g[6])} for g in groups[:limit]],
+                      "p95_us": _round(g[6]), "unique_ips": g[7]} for g in groups],
         }
 
     # -- /api/logs -------------------------------------------------------
-    def logs(self, q, limit=100, before=None, after_seq=None):
+    def logs(self, q, limit=100, before=None, after_seq=None, since=None):
         """Newest first. `before` is a (ts_ms, seq) cursor from the previous page; `after_seq` returns only rows
-        ingested after that seq (live mode). Searches outward from the newest end of the range in growing windows,
+        ingested after that seq (live mode); `since` is a (ts_ms, seq) cursor for the page just newer than a row
+        (paging back up after jumping to an earlier moment). Searches outward from the cursor in growing windows,
         so a page from a 30-day range does not sort 30 days of rows."""
         limit = max(1, min(500, limit))
         cols = ", ".join("epoch_ms(ts)" if c == "ts" else c for c in LOG_COLUMNS)
+        if since is not None:
+            return self._logs_newer(q, limit, since, cols)
         hi = q.to_ms if before is None else min(q.to_ms, before[0] + 1)
         window = 15 * 60_000
         rows = []
@@ -439,10 +509,41 @@ class Runner:
                 break
             window *= 4                      # widen and search the same newest end again
         more = len(rows) == limit
+        total = None
+        if before is None and after_seq is None:
+            # how many match in the whole range (cheap from the rollups when the filters allow)
+            if q.rollup_ok():
+                rw, rp = where(q, rollup=True)
+                total = self.run(f"SELECT coalesce(sum(requests), 0)::BIGINT FROM minute_stats WHERE {rw}", rp)[0][0]
+            else:
+                rw, rp = where(q)
+                total = self.run(f"SELECT count(*) FROM requests WHERE {rw}", rp)[0][0]
         return {
-            "columns": list(LOG_COLUMNS), "rows": [list(r) for r in rows],
+            "columns": list(LOG_COLUMNS), "rows": [list(r) for r in rows], "total": total,
             "next": [rows[-1][2], rows[-1][0]] if more else None,
             "max_seq": max((r[0] for r in rows), default=after_seq),
+        }
+
+    def _logs_newer(self, q, limit, since, cols):
+        """The `limit` rows just newer than the (ts_ms, seq) cursor, returned newest first like any page. `newer` is
+        the cursor for the page after that, or None once the newest matching row is included."""
+        lo = max(q.from_ms, since[0])
+        window = 15 * 60_000
+        while True:
+            hi = min(q.to_ms, lo + window)
+            w, p = where(Query(lo, hi, q.conds, q.min_us, q.max_us, q.headers))
+            rows = self.run(
+                f"""SELECT {cols} FROM requests WHERE {w} AND (epoch_ms(ts) > ? OR (epoch_ms(ts) = ? AND seq > ?))
+                    ORDER BY ts ASC, seq ASC LIMIT {limit}""", p + [since[0], since[0], since[1]])
+            if len(rows) >= limit or hi >= q.to_ms:
+                break
+            window *= 4
+        more = len(rows) == limit
+        rows.reverse()
+        return {
+            "columns": list(LOG_COLUMNS), "rows": [list(r) for r in rows], "total": None, "next": None,
+            "newer": [rows[0][2], rows[0][0]] if more else None,
+            "max_seq": max((r[0] for r in rows), default=None),
         }
 
     # -- /api/fields -----------------------------------------------------

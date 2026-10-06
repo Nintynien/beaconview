@@ -58,7 +58,8 @@ liveness probe.
 python -m venv .venv && .venv/bin/pip install -r requirements.txt pytest
 .venv/bin/python -m pytest
 ACCESS_LOG=./access.log DATA_DIR=./data .venv/bin/python -m beaconview
-python tools/genlog.py ./access.log --rate 300 --seconds 600    # synthetic traffic
+python tools/genlog.py ./access.log --rate 300 --seconds 600    # synthetic traffic, constant rate
+python tools/genlog.py ./access.log --realistic --rate 20 --history 6 --seconds 3600   # a demo that looks like a real day
 python tools/bench.py ./bench.duckdb --days 7 --rate 300        # storage and query timings
 ```
 

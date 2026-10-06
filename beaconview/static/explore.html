@@ -55,70 +55,55 @@
       </div>
       <span class="chips" id="chips"></span>
       <span class="grow"></span>
-      <button class="btn" id="liveBtn" type="button" aria-pressed="false" title="Follow new requests as they arrive">
-        <span class="dot" id="liveDot"></span>Live
+      <button class="btn" id="liveBtn" type="button" aria-pressed="false"
+        title="Add new matching requests to the log as they arrive (charts and numbers stay as they are; ↻ refreshes them)">
+        <span class="dot" id="liveDot"></span>Follow
       </button>
       <button class="btn icon" id="refreshBtn" type="button" title="Refresh" aria-label="Refresh">↻</button>
     </div>
 
+    <div class="banner" id="statusBanner" role="status" hidden></div>
     <div class="banner error" id="banner" hidden></div>
 
-    <section class="tiles" id="tiles" aria-label="Summary"></section>
-
-    <div class="stack">
-      <section class="card" id="seriesCard" aria-labelledby="seriesTitle">
-        <div class="head">
-          <h2 id="seriesTitle">Requests</h2>
-          <span class="sub" id="seriesSub"></span>
-          <span class="spacer"></span>
-          <label class="sub" for="splitSel">Split by</label>
-          <select id="splitSel"></select>
-          <button class="btn" id="seriesTableBtn" type="button" aria-pressed="false">Table</button>
+    <section class="card" id="vizCard" aria-label="Chart">
+      <div class="head vizhead">
+        <div class="seg" role="tablist" aria-label="View">
+          <button type="button" role="tab" id="viewTs" aria-selected="true" aria-controls="tsPanel">Timeseries</button>
+          <button type="button" role="tab" id="viewBd" aria-selected="false" aria-controls="bdPanel">Breakdown</button>
         </div>
-        <div class="legend" id="seriesLegend" hidden></div>
-        <div id="seriesChart" aria-describedby="seriesHelp"></div>
-        <div class="chart-table" id="seriesTable" hidden></div>
-        <p class="sr-only" id="seriesHelp">Use the left and right arrow keys to step through time buckets. Drag across the chart to zoom into a range.</p>
-      </section>
-
-      <section class="card" id="latencyCard" aria-labelledby="latencyTitle">
-        <div class="head">
-          <h2 id="latencyTitle">Response time</h2>
-          <span class="sub" id="latencySub"></span>
-          <span class="spacer"></span>
-          <button class="btn" id="latencyTableBtn" type="button" aria-pressed="false">Table</button>
-        </div>
-        <div class="legend" id="latencyLegend" hidden></div>
-        <div id="latencyChart"></div>
-        <div class="chart-table" id="latencyTable" hidden></div>
-      </section>
-
-      <div class="split2">
-        <section class="card" id="topCard" aria-labelledby="topTitle">
-          <div class="head">
-            <h2 id="topTitle">Top</h2>
-            <select id="topSel" aria-label="Field to rank"></select>
-            <span class="spacer"></span>
-            <span class="sub" id="topSub"></span>
-          </div>
-          <div class="toplist" id="topList"></div>
-        </section>
-
-        <section class="card" id="logsCard" aria-labelledby="logsTitle">
-          <div class="head">
-            <h2 id="logsTitle">Requests</h2>
-            <span class="sub" id="logsSub"></span>
-          </div>
-          <div class="logwrap">
-            <table>
-              <thead><tr id="logsHead"></tr></thead>
-              <tbody class="rows" id="logsBody"></tbody>
-            </table>
-          </div>
-          <div class="more"><button class="btn" id="moreBtn" type="button" hidden>Load older</button></div>
-        </section>
+        <span class="ctl ts-only"><label for="measureSel">Show</label><select id="measureSel"></select></span>
+        <span class="ctl ts-only" id="splitCtl"><label for="splitSel">Split by</label><select id="splitSel"></select></span>
+        <span class="ctl bd-only" hidden><label for="groupSel">Group by</label><select id="groupSel"></select></span>
+        <span class="spacer"></span>
+        <span class="sub" id="vizSub"></span>
+        <button class="btn ts-only" id="tableBtn" type="button" aria-pressed="false">Table</button>
       </div>
-    </div>
+      <div id="tsPanel" role="tabpanel" aria-labelledby="viewTs">
+        <div class="legend" id="vizLegend" hidden></div>
+        <div id="tsChart" aria-describedby="tsHelp"></div>
+        <div class="chart-table" id="tsTable" hidden></div>
+        <p class="sr-only" id="tsHelp">Arrow keys step through time buckets; Enter shows the requests in that bucket. Click a bar to jump the log there, drag across the chart to zoom.</p>
+      </div>
+      <div id="bdPanel" role="tabpanel" aria-labelledby="viewBd" hidden>
+        <div class="tablewrap"><table class="plain bd" id="bdTable"></table></div>
+      </div>
+    </section>
+
+    <section class="card" id="logsCard" aria-labelledby="logsTitle">
+      <div class="head">
+        <h2 id="logsTitle">Requests</h2>
+        <span class="sub" id="logsSub"></span>
+        <button class="btn" id="newestBtn" type="button" hidden>Back to newest</button>
+      </div>
+      <div class="more above"><button class="btn" id="newerBtn" type="button" hidden>Load newer</button></div>
+      <div class="logwrap" id="logWrap">
+        <table>
+          <thead><tr id="logsHead"></tr></thead>
+          <tbody class="rows" id="logsBody"></tbody>
+        </table>
+      </div>
+      <div class="more"><button class="btn" id="moreBtn" type="button" hidden>Load older</button></div>
+    </section>
   </main>
 
   <div class="scrim" id="scrim" hidden></div>

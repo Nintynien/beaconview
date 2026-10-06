@@ -112,3 +112,40 @@ def test_pages_and_static(site):
     assert get(addr, "/static/../server.py")[0] == 404
     assert get(addr, "/static/%2e%2e/server.py")[0] == 404
     assert get(addr, "/static/nope.js")[0] == 404
+
+
+def test_answer_cache_shares_and_expires():
+    import time as real_time
+
+    from beaconview.server import AnswerCache
+    cache = AnswerCache(ttl=0.2)
+    calls = []
+
+    def slow():
+        calls.append(1)
+        real_time.sleep(0.1)
+        return {"n": len(calls)}
+
+    # five identical requests at once: one query, one answer for all
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(cache.get("k", slow))) for _ in range(5)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(calls) == 1 and results == [{"n": 1}] * 5
+    assert cache.get("k", slow) == {"n": 1}                 # still fresh
+    real_time.sleep(0.25)
+    assert cache.get("k", slow) == {"n": 2}                 # expired: asked again
+
+
+def test_answer_cache_does_not_keep_failures():
+    from beaconview.server import AnswerCache
+    cache = AnswerCache(ttl=10)
+
+    def boom():
+        raise ValueError("nope")
+
+    with pytest.raises(ValueError):
+        cache.get("k", boom)
+    assert cache.get("k", lambda: 42) == 42

@@ -86,13 +86,31 @@ window.BV = BV;
   BV.when = function (ms, spanMs) {   // a time, with the date when the span crosses days
     return spanMs > 20 * 3600e3 ? BV.day(ms) + " " + BV.clock(ms) : BV.clock(ms, spanMs < 30 * 60e3);
   };
+  // Server clock minus this browser's, from the last /api/status; "ago" is measured on the server's clock so a
+  // visitor whose clock is off still sees the right age.
+  BV.skew = 0;
   BV.ago = function (ms) {
-    var s = Math.max(0, (Date.now() - ms) / 1000);
-    if (s < 60) return Math.round(s) + " s ago";
-    if (s < 3600) return Math.round(s / 60) + " min ago";
-    if (s < 86400) return Math.round(s / 3600) + " h ago";
-    return Math.round(s / 86400) + " d ago";
+    var s = Math.max(0, (Date.now() + BV.skew - ms) / 1000);
+    if (s < 60) return Math.floor(s) + " s ago";       // floor: the text counts up, never jumps ahead
+    if (s < 3600) return Math.floor(s / 60) + " min ago";
+    if (s < 86400) return Math.floor(s / 3600) + " h ago";
+    return Math.floor(s / 86400) + " d ago";
   };
+  // A text node that keeps its age current: "Newest request 14 s ago" counts up between refreshes instead of
+  // showing the age it had when the data arrived.
+  BV.agoText = function (node, ms, prefix, suffix) {
+    node.setAttribute("data-ago", ms);
+    node.setAttribute("data-ago-prefix", prefix || "");
+    node.setAttribute("data-ago-suffix", suffix || "");
+    node.textContent = (prefix || "") + BV.ago(ms) + (suffix || "");
+    return node;
+  };
+  setInterval(function () {
+    document.querySelectorAll("[data-ago]").forEach(function (n) {
+      n.textContent = n.getAttribute("data-ago-prefix") + BV.ago(Number(n.getAttribute("data-ago"))) +
+        n.getAttribute("data-ago-suffix");
+    });
+  }, 1000);
   BV.span = function (ms) {
     var m = ms / 60e3;
     if (m < 60) return Math.round(m) + " min";
@@ -141,9 +159,11 @@ window.BV = BV;
   BV.rangeToUrl = function (r, p) {
     if (r.range) p.set("range", r.range); else { p.set("from", r.from); p.set("to", r.to); }
   };
+  // A relative range ends on the last whole 5 seconds, so every open tab asks the server the identical question
+  // and they share one cached answer (AnswerCache); the cost is data up to 5 s behind.
   BV.rangeWindow = function (r) {
     if (r.range) {
-      var now = Date.now();
+      var now = Math.floor(Date.now() / 5000) * 5000;
       return { from: now - (preset(r.range) || preset("1h"))[2], to: now };
     }
     return { from: r.from, to: r.to };
@@ -224,25 +244,52 @@ window.BV = BV;
     }
   };
 
-  /* ---------- header ingest status ---------- */
-  BV.initIngestStatus = function (dot, text) {
+  /* ---------- ingest status: the header dot, and a banner only when something is wrong ---------- */
+  var QUIET_MS = 5 * 60e3;          // no request for this long turns the dot yellow (quiet sites are allowed to be quiet)
+  var BEHIND_BYTES = 50e6;          // a backlog this big gets a banner: recent numbers are incomplete until it clears
+  BV.initIngestStatus = function (dot, text, banner) {
+    function setBanner(kind, message) {
+      if (!banner) return;
+      banner.hidden = !message;
+      banner.className = "banner " + (kind || "");
+      banner.textContent = message || "";
+    }
     function tick() {
       BV.api("/api/status").then(function (s) {
-        var ing = s.ingest, behind = ing.newest_ms ? (s.now_ms - ing.newest_ms) / 1000 : null;
+        BV.skew = s.now_ms - Date.now();
+        var ing = s.ingest, st = s.storage;
         var unread = ing.sources.reduce(function (a, x) { return a + (x.unread_bytes || 0); }, 0);
-        var errors = ing.sources.filter(function (x) { return x.error; });
-        dot.className = "dot " + (!ing.alive || errors.length ? "bad" : "good");
-        var msg = !ing.alive ? "Ingest stopped" : errors.length ? "Can't read " + errors[0].path
-          : unread > 1e6 ? "Catching up (" + BV.bytes(unread) + " behind)"
-          : behind === null ? "Waiting for the first request" : "Newest request " + BV.ago(ing.newest_ms);
-        text.textContent = msg;
-        dot.parentNode.title = msg + " · " + BV.int(s.storage.rows) + " requests stored · " + BV.bytes(s.storage.db_bytes);
+        var broken = ing.sources.filter(function (x) { return x.error; });
+        var quiet = ing.newest_ms && s.now_ms - ing.newest_ms > QUIET_MS;
+        text.removeAttribute("data-ago");
+        if (!ing.alive) {
+          dot.className = "dot bad"; text.textContent = "Ingest stopped";
+          setBanner("error", "BeaconView has stopped recording requests" +
+            (ing.last_error ? " (" + ing.last_error + ")" : "") + ". What you see ends there; restarting the container resumes from where it stopped.");
+        } else if (broken.length) {
+          dot.className = "dot bad"; text.textContent = "Can't read a log";
+          setBanner("error", broken.map(function (x) { return "Can't read " + x.path + ": " + x.error; }).join(" · ") +
+            ". Requests in that log are not being recorded.");
+        } else if (unread > BEHIND_BYTES) {
+          dot.className = "dot warn"; text.textContent = "Catching up";
+          setBanner("info", "Catching up on " + BV.bytes(unread) + " of log. The newest numbers are incomplete until it finishes.");
+        } else {
+          dot.className = "dot " + (quiet ? "warn" : "good");
+          if (ing.newest_ms) BV.agoText(text, ing.newest_ms, "Newest request ");
+          else text.textContent = "Waiting for the first request";
+          setBanner(null, null);
+        }
+        dot.parentNode.title = BV.int(st.rows) + " requests stored · " + BV.bytes(st.db_bytes) +
+          (st.oldest_ms ? " · since " + BV.day(st.oldest_ms) : "") + " · keeping " + s.retention.raw_days + " days" +
+          (quiet ? " · nothing new for over 5 minutes: a quiet site, or Traefik is not writing its log" : "");
       }).catch(function () {
         dot.className = "dot bad";
         text.textContent = "BeaconView unreachable";
+        setBanner("error", "Can't reach BeaconView. What's on this page may be out of date.");
       });
     }
     tick();
-    setInterval(tick, 30000);
+    setInterval(function () { if (!document.hidden) tick(); }, 15000);
+    document.addEventListener("visibilitychange", function () { if (!document.hidden) tick(); });
   };
 })();

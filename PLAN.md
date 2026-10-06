@@ -193,10 +193,18 @@ and must hold up in both themes.
 Shared: a **time-range picker** (15m, 1h, 6h, 24h, 7d, 30d, custom start/end, clamped to the retention window), and the
 whole query in the URL so any view can be bookmarked or shared. Drag across a chart to zoom the range.
 
+**Which page a feature belongs on:** the Overview tells you, unasked, how the whole proxy is doing (curated, fixed,
+compared with the previous period, every value a link into Explore); Explore answers a question you bring (filters,
+any split or field, down to single requests, the URL is the question). Needs you to say what you are looking for:
+Explore. Worth seeing every time without asking: Overview.
+
+**Ingest health** is not a section of either page: the header dot (green; yellow after 5 minutes without a request,
+which may just be a quiet site; red when broken) with details on hover, and a banner on both pages only while
+something is wrong (ingest stopped, a log it cannot read, catching up on > 50 MB). The "newest request … ago" text
+counts up every second between status checks (every 15 s), measured on the server's clock.
+
 ### Overview (`/`)
 
-- **Status strip:** ingesting / catching up / stopped, newest request, ingest rate, unreadable lines, rows and DB
-  size, oldest row and retention.
 - **Tiles:** requests, req/s, unique IPs, 5xx rate, 4xx rate, p95, bytes sent — each with the change vs the
   previous period of the same length (rates in percentage points; red/green only where up is bad: error rates, p95).
 - **Chart:** requests over time stacked by status class (drag to zoom).
@@ -204,24 +212,37 @@ whole query in the URL so any view can be bookmarked or shared. Drag across a ch
   requests, 4xx %, 5xx % (each linking to those requests), p50, p95, bytes.
 - **Top lists:** status codes, paths, client IPs, user agents, hosts; **recent 5xx** (10 newest).
 - Every value links into Explore with that filter and the same range; an instance picker appears when there is
-  more than one log. Relative ranges refresh every minute while the tab is visible.
+  more than one log.
+- **Live** (default on for preset ranges, off for custom/zoomed ones): two tiers, sized to the range. What the
+  rollups answer (chart, traffic table, status codes, hosts, recent 5xx) every 10 s up to 1 h, 15 s up to 24 h,
+  30 s beyond; what scans raw rows (tiles with unique IPs, top paths/IPs/user agents) every 10 s / 30 s / 60 s.
+  Updates land in place without dimming, new 5xx rows are highlighted, nothing runs while the tab is hidden.
 
 Counts, bytes and percentiles come from `minute_stats` (histograms); unique IPs and raw-field tops from `requests`.
 
 ### Explore (`/explore`)
 
+Redesigned 2026-10-06: one switchable panel on top, the matching requests below it, the two linked.
+
 - **Filter bar:** host, router, service, method, path (exact or prefix `/api/*`), status (code or class, lists),
   IP (exact or CIDR), user agent (contains), minimum duration, any kept header. Each filter can be negated
   (`status != 304`). Chips show active filters.
-- **Chart (top):** requests over time as stacked columns; bucket count from the chart width (~7 px per column,
-  20–240); *split by* status class (default), any field (top 5 + Other), or nothing.
-- **Response time chart:** p50/p95 lines on the same buckets (from the rollup histograms when filters allow).
-- **Summary bar:** matches, unique IPs, p50/p95, bytes.
-- **Top values panel:** pick a field, see its top values for the current filters ("which IPs hit `/api/state` in
-  this hour" is one click).
-- **Log lines (bottom):** newest first, keyset-paged by `seq` ("load more"). Click a row for every field; click an IP,
-  path or user agent to add it as a filter.
-- **Live mode:** polls `/api/logs?after=<seq>` every 5 s and prepends new matching lines.
+- **Top panel, Timeseries:** one measure over time: requests or bytes (stacked columns, split by status class or
+  any field, top 5 + Other), response time (p50/p95/p99 lines, from the rollup histograms when filters allow),
+  unique IPs, or error rate (4xx/5xx % lines). Bucket count from the chart width; hover tooltip; drag zooms.
+- **Top panel, Breakdown:** one row per value of a field (top 50) with requests, req/s, unique IPs, 4xx %, 5xx %,
+  p50, p95 and bytes; click a column header to sort; `=` / `≠` filter to or exclude a value. Grouping by nothing
+  gives a single totals row, which is where the old summary tiles went. (The separate top-values panel merged into
+  this.)
+- **Linked:** hovering a request marks its bucket in the Timeseries (accent band or crosshair) or its group in the
+  Breakdown; clicking a bar (or Enter on a focused bucket) jumps the log to that moment ("from 14:05 back", with
+  "Back to newest"). From there "Load older" pages down and "Load newer" pages up, keeping the rows being read in
+  place; reaching the newest request returns the log to its normal newest-first mode (and Follow resumes).
+- **Requests (bottom):** newest first with a total match count, keyset-paged ("Load older"). Click a row for every
+  field with filter buttons.
+- **Follow:** polls `/api/logs?after=<seq>` every 5 s and prepends new matching lines, a filtered `tail -f`. The
+  panel holds still; ↻ re-asks. (`follow=1` in the URL; `live=1` from older links still works.)
+- URL keeps the view: `view=breakdown`, `measure=`, `split=`, `group=`, `sort=` (old `top=` links map to `group=`).
 
 ## API
 
@@ -229,13 +250,17 @@ All JSON, all bounded by a time range, all results capped.
 
 | Endpoint | Returns |
 |---|---|
-| `GET /api/breakdown?<filters>&by&sort&limit` | per-group requests, req/s, 4xx/5xx, p50/p95, bytes; sort by requests, p95 or errors |
+| `GET /api/breakdown?<filters>&by&sort&limit&unique` | per-group requests, req/s, 4xx/5xx, p50/p95, bytes, unique IPs (`unique=1`); `by=none` for totals; sort by any column |
 | `GET /api/summary?<filters>` | requests, req/s, 4xx/5xx, unique IPs, p50/p95, bytes |
-| `GET /api/series?<filters>&buckets&split` | time buckets × series, plus p50/p95 per bucket |
+| `GET /api/series?<filters>&buckets&measure&split` | time buckets × series; measure = requests, bytes, latency (p50/p95/p99), unique_ips, error_rate |
 | `GET /api/top?field&<filters>&limit` | top values with counts and share |
-| `GET /api/logs?<filters>&before=<seq>&after=<seq>&limit` | log lines |
+| `GET /api/logs?<filters>&before=<ts:seq>&since=<ts:seq>&after=<seq>&limit` | log lines, newest first: older than `before`, the page just newer than `since`, or ingested after `after`; the first page carries the total match count |
 | `GET /api/fields` | filterable fields and their known values (hosts, routers, services) |
 | `GET /api/status` | ingest and storage health (also used by the container healthcheck) |
+
+**Answer cache:** identical API requests within 5 s share one answer, and concurrent identical requests run the query
+once (`AnswerCache`, single flight; follow requests are never cached). Pages end relative ranges on a 5 s boundary
+so every tab watching "last hour" asks the identical question: ten tabs cost about what one does.
 
 Filters are parsed into parameterised SQL from a whitelist of fields and operators; user input never becomes SQL text.
 URL form, shared by the API and the Explore page (so any view is a link):
@@ -302,7 +327,9 @@ pytest with recorded and generated log lines:
 ## Load test (part of milestone 1)
 
 `tools/genlog.py` writes realistic lines (a host/path/IP/user-agent mix with skew, status mix, latency
-distribution) at a set rate, rotating like logrotate. `tools/bench.py` times the API queries.
+distribution) at a set rate, rotating like logrotate. `--realistic --history H` shapes it like a real day for demos:
+a daily curve, per-hour random events (a client hammering `/api/state`, quiet gaps, a service failing with slow 5xx,
+rare outages) plus one of each placed in the last hours on purpose. `tools/bench.py` times the API queries.
 
 | Scenario | Measure | Target |
 |---|---|---|

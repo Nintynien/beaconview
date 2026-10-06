@@ -36,10 +36,13 @@
       </div>
       <select id="instanceSel" aria-label="Instance" hidden></select>
       <span class="grow"></span>
+      <button class="btn" id="liveBtn" type="button" aria-pressed="true" title="Keep this page up to date">
+        <span class="dot" id="liveDot"></span>Live
+      </button>
       <button class="btn icon" id="refreshBtn" type="button" title="Refresh" aria-label="Refresh">↻</button>
     </div>
 
-    <div class="strip" id="strip" aria-label="Ingest and storage"></div>
+    <div class="banner" id="statusBanner" role="status" hidden></div>
     <div class="banner error" id="banner" hidden></div>
     <section class="tiles" id="tiles" aria-label="Summary"></section>
 
