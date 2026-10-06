@@ -5,7 +5,7 @@ searchable history of every request: who is hitting what, how often, what they g
 tracking to your sites and never sits in the request path: if BeaconView is slow or stopped, your traffic is
 unaffected.
 
-![The Overview: a day of traffic by status, per router, top paths and clients](docs/screenshots/overview.png)
+![The Overview: a highlight about one client, six hours of traffic by status, per router, and a map of client countries](docs/screenshots/overview.png)
 
 > **Status: early (v0.2).** Built for one Traefik host with a handful of people looking at it. See
 > [the design notes](docs/design.md) for how it works and what is planned.
@@ -29,9 +29,9 @@ unaffected.
 - **Settings** — what is being read and how far along, database size, and retention or IP handling you can change
   while it runs.
 
-| Explore | Breakdown by client IP |
+| Explore | Breakdown by country |
 |---|---|
-| ![Explore: requests over six hours, split by status, with the matching requests below](docs/screenshots/explore.png) | ![Breakdown: one row per client IP with requests, error rates and latency](docs/screenshots/breakdown.png) |
+| ![Explore: requests over six hours, split by status, with the matching requests below](docs/screenshots/explore.png) | ![Breakdown: where 4xx responses came from, on a map and per country with error rates and latency](docs/screenshots/breakdown.png) |
 
 ## Quick start
 
