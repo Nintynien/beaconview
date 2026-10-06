@@ -97,3 +97,18 @@ def test_write_failure_rewinds_and_retries(tmp_path, monkeypatch):
     assert wait_for(lambda: count(store) == 5)
     assert ing.write_errors == 1 and "disk hiccup" in ing.last_error
     stop(store, ing)
+
+
+def test_write_rate_covers_the_last_minute(tmp_path):
+    cfg = make_cfg(tmp_path)
+    store = Store(cfg.db_path, "256MB", 2)
+    clock = {"t": 1000.0}
+    ing = Ingestor(cfg, store, clock=lambda: clock["t"])
+    ing._update_rate(6000, 1000.0)                  # a catch-up burst
+    assert ing.rows_per_sec() == 100.0
+    clock["t"] = 1030.0
+    ing._update_rate(30, 1030.0)
+    assert ing.rows_per_sec() == 100.5                # (6000 + 30) / 60
+    clock["t"] = 1061.0                             # the burst is over a minute old: gone, not lingering
+    assert ing.rows_per_sec() == 0.5
+    store.close()

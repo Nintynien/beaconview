@@ -1,8 +1,13 @@
 name: Build & Push
 
+# Every push and pull request: tests, then the image is built and smoke-tested against a generated log.
+# Pushes to main publish ghcr.io/<owner>/beaconview:edge (and :sha-<commit>); a version tag (git tag v0.1.0)
+# publishes :0.1.0, :0.1 and :latest, so people pulling :latest get releases, not every commit.
+
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
@@ -26,8 +31,35 @@ jobs:
           pip install -r requirements.txt pytest
           python -m pytest
 
-  build:
+  smoke:
     needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Build the image
+        run: docker build -t beaconview:ci .
+
+      - name: Run it against a generated log
+        run: |
+          mkdir -p /tmp/traefik
+          python tools/genlog.py /tmp/traefik/access.log --backlog 2000 --hours 1
+          chmod 0644 /tmp/traefik/access.log
+          docker run -d --name bv -p 8080:8080 -v /tmp/traefik:/var/log/traefik:ro -e INSTANCE_NAME=ci beaconview:ci
+          python tools/smoke.py http://127.0.0.1:8080 2000
+
+      - name: Container logs
+        if: always()
+        run: docker logs bv || true
+
+  build:
+    needs: smoke
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
@@ -40,6 +72,19 @@ jobs:
 
       - name: Set image name
         run: echo "IMAGE_NAME=${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - name: Image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: latest=false
+          tags: |
+            type=edge,branch=main
+            type=sha,format=short
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -60,8 +105,7 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

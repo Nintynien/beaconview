@@ -1,4 +1,4 @@
-"""Settings, all from environment variables (see the Configuration table in PLAN.md / README)."""
+"""Settings, all from environment variables (see the Configuration table in the README and docs/design.md)."""
 
 import os
 import socket

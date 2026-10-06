@@ -106,10 +106,15 @@
   function loadTiles(quiet) {
     var w = win(), span = w.to - w.from;
     var prevW = { from: w.from - span, to: w.from };
+    // Compare only when the stored data reaches back over the whole previous period: a fresh install (or one younger
+    // than twice the range) would otherwise compare a full period against a sliver and show "up 68,000%".
+    var oldest = meta && meta.data ? meta.data.oldest_ms : null;
+    var comparable = oldest !== null && oldest !== undefined && oldest <= prevW.from + 60e3;
     if (!quiet) $("tiles").classList.add("loading");
-    Promise.all([BV.api("/api/summary", params(null, w)), BV.api("/api/summary", params(null, prevW))]).then(function (r) {
+    Promise.all([BV.api("/api/summary", params(null, w)),
+      comparable ? BV.api("/api/summary", params(null, prevW)) : Promise.resolve(null)]).then(function (r) {
       $("tiles").classList.remove("loading");
-      var s = r[0], p = r[1];
+      var s = r[0], p = r[1] || {};
       var rate = function (x, n) { return x.requests ? n / x.requests : null; };
       var vs = "vs previous " + BV.span(span);
       var tiles = [
@@ -122,11 +127,13 @@
         ["Sent", BV.bytes(s.bytes), delta(s.bytes, p.bytes, "neutral")],
       ];
       var box = BV.clear($("tiles"));
-      tiles.forEach(function (t) {
-        var d = t[2];
+      tiles.forEach(function (t, i) {
+        // without enough history, say so once rather than on every tile
+        var d = comparable ? t[2] : i === 0 ? { text: "nothing earlier to compare yet", cls: "" } : null;
         box.appendChild(el("div", { class: "tile" }, el("div", { class: "label", text: t[0] }),
           el("div", { class: "value", text: t[1] }),
-          d ? el("div", { class: "delta " + d.cls, title: vs, text: d.text + " " + (d.text === "no change" || d.text === "new" ? "" : vs) }) : null));
+          d ? el("div", { class: "delta " + d.cls, title: comparable ? vs : "BeaconView has not been collecting long enough to compare",
+            text: comparable && d.text !== "no change" && d.text !== "new" ? d.text + " " + vs : d.text }) : null));
       });
       if (errors.tiles) { delete errors.tiles; banner(); }
     }).catch(function (e) { $("tiles").classList.remove("loading"); errors.tiles = e.message; banner(); });

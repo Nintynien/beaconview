@@ -292,7 +292,9 @@
         (d.rows.length === 50 ? " shown (top 50)" : "") + " · " : "") + BV.rangeLabel(state);
       var t = BV.clear($("bdTable"));
       var head = el("tr", null, el("th", { text: d.by ? fieldLabel(d.by) : "" }));
-      BD_COLS.forEach(function (c) {
+      // grouped by client IP, every row is one IP: the unique-IP column says nothing
+      var cols = BD_COLS.filter(function (c) { return !(d.by === "ip" && c[0] === "unique_ips"); });
+      cols.forEach(function (c) {
         var th = el("th", { class: "num" + (c[0] ? " sortable" : ""), text: c[1],
           "aria-sort": c[0] && (state.sort === c[0] || (state.sort === "errors" && c[0] === "status_5xx")) ? "descending" : null });
         if (c[0]) {
@@ -312,7 +314,7 @@
         var name = el("td", { class: "name" + (d.by === "user_agent" ? "" : " mono") },
           el("span", { title: r.value, text: d.by ? r.value : "All matching requests" }),
           d.by ? el("span", { class: "share" }, el("i", { style: "width:" + Math.max(1, Math.round(r.share * 100)) + "%" })) : null);
-        var tr = el("tr", { "data-value": r.value }, name, BD_COLS.map(function (c) {
+        var tr = el("tr", { "data-value": r.value }, name, cols.map(function (c) {
           return el("td", { class: "num", text: c[2](r, d) });
         }));
         if (d.by) {

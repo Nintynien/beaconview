@@ -1,12 +1,15 @@
-# BeaconView — plan
+# BeaconView — design
+
+How BeaconView works and why it is built the way it is: the decisions, the measurements behind them, and what is
+planned next. For running it, see the [README](../README.md).
 
 A small, self-hosted request explorer for Traefik. It reads Traefik's JSON access log, keeps a configurable window
 of every request in an embedded columnar database, and serves two pages: an overview of the whole proxy and an
 explorer for slicing requests by time, host, path, status, IP or user agent (chart on top, log lines below).
 
-Status: milestones 1 (ingest + storage), 2 (Explore + query API) and 3 (Overview) implemented; 4 (publish) next. Named BeaconView (2026-10-05): independent of the Traefik mark, so it also fits if other proxies
-(Caddy, nginx JSON logs) are supported later. The README's first line should say it reads access logs and adds no
-tracking, since "web beacon" also means a tracking pixel.
+Status: v0.1 (milestones 1–3 done, 4 in progress). The name is independent of the Traefik mark, so it also fits if
+other proxies (Caddy, nginx JSON logs) are supported later. The README's first line says it reads access logs and
+adds no tracking, since "web beacon" also means a tracking pixel.
 
 ## Goals
 
@@ -254,8 +257,8 @@ Redesigned 2026-10-06: one switchable panel on top, the matching requests below 
   lighter and labelled "so far", so it does not read as a drop. **Pause** freezes the window on screen as a fixed
   from/to range (shareable, nothing moves); zooming does the same; **Live** returns to the preset. While the log
   shows an earlier moment (a clicked bar) the chart keeps moving and new rows wait. Falls back to polling if
-  streaming fails. History (2026-10-06): a log-only "Follow", then a Live toggle beside the range, before settling
-  on this at the owner's suggestion.
+  streaming fails. (Tried first: a log-only "Follow", which looked broken next to a frozen chart, then a Live
+  toggle beside the range, which duplicated what the range already says.)
 - URL keeps the view: `view=breakdown`, `measure=`, `split=`, `group=`, `sort=` (old `top=` links map to `group=`).
 
 ### Settings (`/settings`)
@@ -268,8 +271,8 @@ Redesigned 2026-10-06: one switchable panel on top, the matching requests below 
   values are saved in `meta` and survive restarts. Lowering a retention first shows what it would delete
   (`/api/settings/preview`) and asks; the prune runs within seconds of saving.
 - **Read-only, restart needed:** log paths, backfill, data directory, database limits, port, built-in auth.
-- No auth safeguards in the app beyond optional basic auth: the README tells people to put it behind their proxy's
-  authentication (owner's call, 2026-10-06).
+- No authentication in the app beyond optional basic auth: the README tells people to put it behind their proxy's
+  authentication (Traefik basic auth or forward-auth single sign-on), which does it better than an app can.
 
 ## Realtime
 
@@ -343,14 +346,18 @@ middleware or the built-in basic auth).
 
 ```
 beaconview/
-  beaconview/        __main__.py  config.py  parsers.py  tailer.py  ingest.py  store.py  query.py  server.py
-    static/            overview.html  overview.js  explore.html  explore.js  common.js  chart.js  app.css  logo.svg
+  beaconview/        __main__.py  config.py  settings.py  parsers.py  tailer.py  backfill.py  ingest.py  store.py
+                     query.py  events.py  server.py
+    static/            overview.*  explore.*  settings.*  common.js  chart.js  app.css  logo.svg
   tests/
-  tools/               genlog.py (synthetic Traefik log writer)  bench.py (query timings)
-  Dockerfile           python:3.13-slim (DuckDB wheels target glibc)
-  .github/workflows/   build.yml: tests, then multi-arch image to GHCR
+  tools/               genlog.py (synthetic Traefik logs, --realistic for demos)  bench.py (query timings)
+                       livetest.py (live-tail load test)  smoke.py (checks a running instance; used by CI)
+  docs/design.md     this document
+  Dockerfile           python:3.13-slim (DuckDB wheels target glibc), runs as uid 10001
+  .github/workflows/   build.yml: tests, image smoke test, then multi-arch image to GHCR
+                       (main -> :edge, tag vX.Y.Z -> :X.Y.Z, :X.Y, :latest)
   docker-compose.example.yml
-  README.md  LICENSE (MIT)  PLAN.md
+  README.md  LICENSE (MIT)
 ```
 
 ## Tests
@@ -384,7 +391,7 @@ rare outages) plus one of each placed in the last hours on purpose. `tools/bench
 
 Targets are goals to verify, not promises. If one is missed by a lot, revisit the design before building pages on it.
 
-### Results (2026-10-06, Windows dev box, `DB_THREADS=2`, `DB_MEMORY_LIMIT=512MB`)
+### Results (2026-10-06, a desktop machine, `DB_THREADS=2`, `DB_MEMORY_LIMIT=512MB`)
 
 | Scenario | Result | Target |
 |---|---|---|
@@ -432,26 +439,16 @@ v2 adds remote Traefiks without a second codebase:
 3. **Overview:** tiles, comparisons, tables, links into Explore, status strip. *Done 2026-10-06: built from the
    existing endpoints plus `/api/breakdown` (no separate `/api/overview`), 49 tests, checked in headless Edge at
    1440 px and 390 px in both themes; the range picker moved into common.js and is shared by both pages.*
-4. **Publish:** backfill (*done 2026-10-06*), anonymisation, built-in auth, README (sizing table from the load test, screenshots,
-   compose example, Traefik config to keep `User-Agent`/`Referer`/`CF-Connecting-IP`), CI, first GHCR release.
-
-### Our own deployment (infra-ops)
-
-`apps/beaconview/docker-compose.yml`: mount `/var/log/traefik` read-only, a `beaconview-data` volume, Traefik
-route behind `ADMIN_AUTH` basic auth, Watchtower label. Run alongside `apps/logs` until trusted, then remove
-`apps/logs`. Keep `proxy/traefik-logrotate.conf` (raw files become a short safety copy). Optionally keep
-`If-None-Match` in Traefik's header config to tell new nopixelv tabs from old ones.
+4. **Publish:** backfill, anonymisation, built-in auth, settings page, live updates over SSE (*done 2026-10-06*);
+   CI with an image smoke test and release tags, README with screenshots (from generated traffic, so no real visitor
+   data), sizing table and Traefik config (*done*); first GHCR release (`v0.1.0`).
 
 ## Open questions
 
 - **Positioning:** "request explorer for Traefik" at launch, "for Traefik, Caddy and nginx" once those parsers ship.
-
 - **Multiple instances:** v2 as above, or sooner if wanted; v1 ships the `instance` column and local multi-file only.
-
-- **Name:** BeaconView. Confirm no conflict on GitHub, Docker Hub, GHCR and a trademark search before publishing
-  ("Beacon" is a crowded word; `dunkin6/beacon-viewer` exists on Docker Hub).
-- **Cloudflare in front of our Traefik?** If yes, set `CLIENT_IP_HEADER` from day one and keep that header in Traefik's
-  access log config.
 - **Rollup retention default:** 90 days enough?
+- **"Something unusual" on the Overview:** an IP at 10× its usual rate, a 5xx spike, a new top path; the strongest
+  candidate for the Overview's "tells you without being asked" role.
 - **GeoIP:** country per IP would fit the overview; v1 leaves it out (needs a MaxMind/DB-IP database the user
   supplies). Candidate for v1.1.

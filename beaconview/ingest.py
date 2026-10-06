@@ -7,6 +7,7 @@ With BACKFILL=1, a log BeaconView has never tailed first has its rotated sibling
 first, before the live tail starts at byte 0 of the current file; together they cover everything still on disk.
 """
 
+import collections
 import logging
 import os
 import threading
@@ -21,6 +22,7 @@ from .tailer import Tailer
 log = logging.getLogger("beaconview.ingest")
 
 RETRY_SECONDS = 5.0
+RATE_WINDOW = 60.0                      # seconds the reported write rate covers
 
 
 class Source:
@@ -79,8 +81,8 @@ class Ingestor(threading.Thread):
         self.prune_due = 0.0            # first prune right after startup
         self.pruning = False
         self.last_prune = None          # {"at", "ms"}
-        self.rate = 0.0                 # rows/s, smoothed over about a minute
-        self._rate_at = None
+        self._recent = collections.deque()   # (time, rows) per batch over the last RATE_WINDOW seconds
+        self._recent_lock = threading.Lock()  # appended by this thread, read by status requests
 
     def stop(self):
         self.stop_event.set()
@@ -264,13 +266,19 @@ class Ingestor(threading.Thread):
         self._maintenance()
 
     def _update_rate(self, n, now):
-        if self._rate_at is None:
-            self._rate_at = now
-            return
-        dt = max(1e-3, now - self._rate_at)
-        self._rate_at = now
-        alpha = min(1.0, dt / 60.0)
-        self.rate += alpha * (n / dt - self.rate)
+        with self._recent_lock:
+            self._recent.append((now, n))
+            self._trim_rate(now)
+
+    def _trim_rate(self, now):
+        while self._recent and self._recent[0][0] < now - RATE_WINDOW:
+            self._recent.popleft()
+
+    def rows_per_sec(self):
+        """Rows written over the last minute: a catch-up burst drops out a minute later instead of lingering."""
+        with self._recent_lock:
+            self._trim_rate(self.clock())
+            return sum(n for _, n in self._recent) / RATE_WINDOW
 
     def _maintenance(self):
         now = self.clock()
@@ -300,7 +308,7 @@ class Ingestor(threading.Thread):
         newest = [s.newest_ms for s in self.sources if s.newest_ms is not None]
         return {
             "alive": self.is_alive(),
-            "rows_per_sec": round(self.rate, 2),
+            "rows_per_sec": round(self.rows_per_sec(), 2),
             "batches": self.batches,
             "last_batch": self.last_batch,
             "write_errors": self.write_errors,
