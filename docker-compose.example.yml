@@ -1,0 +1,42 @@
+# BeaconView next to Traefik. Traefik must write a JSON access log to a file, e.g. in traefik.yml:
+#
+#   accessLog:
+#     filePath: /var/log/traefik/access.log
+#     format: json
+#     fields:
+#       headers:
+#         defaultMode: drop
+#         names:
+#           User-Agent: keep
+#           Referer: keep
+#           # CF-Connecting-IP: keep     # behind Cloudflare; then set CLIENT_IP_HEADER below
+#
+# BeaconView shows visitor IPs and request paths: never expose it without authentication.
+
+services:
+  beaconview:
+    image: ghcr.io/nintynien/beaconview:latest
+    restart: unless-stopped
+    environment:
+      ACCESS_LOG: /var/log/traefik/access.log
+      INSTANCE_NAME: edge
+      RETENTION_DAYS: "7"
+      # CLIENT_IP_HEADER: CF-Connecting-IP
+      # BASIC_AUTH_USER: admin
+      # BASIC_AUTH_PASSWORD: change-me
+    volumes:
+      - /var/log/traefik:/var/log/traefik:ro
+      - beaconview-data:/data
+    # read the log file as its owner if it is not world-readable:
+    # user: "0:0"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.beaconview.rule=Host(`beaconview.example.com`)"
+      - "traefik.http.routers.beaconview.entrypoints=websecure"
+      - "traefik.http.routers.beaconview.tls.certresolver=letsencrypt"
+      - "traefik.http.services.beaconview.loadbalancer.server.port=8080"
+      - "traefik.http.routers.beaconview.middlewares=beaconview-auth"
+      - "traefik.http.middlewares.beaconview-auth.basicauth.users=admin:$$apr1$$replace$$me"
+
+volumes:
+  beaconview-data:
