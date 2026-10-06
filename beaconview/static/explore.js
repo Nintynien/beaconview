@@ -21,9 +21,9 @@
   var SPLITTABLE = { requests: true, bytes: true };
   var LOG_COLS = [
     ["ts", "Time"], ["status", "Status"], ["method", "Method"], ["host", "Host"], ["path", "Path"],
-    ["ip", "Client IP"], ["duration_us", "Duration", "num"], ["bytes", "Size", "num"],
+    ["ip", "Client IP"], ["country", "Country"], ["duration_us", "Duration", "num"], ["bytes", "Size", "num"],
   ];
-  var DETAIL_ORDER = ["ts", "instance", "status", "origin_status", "method", "host", "path", "query", "ip",
+  var DETAIL_ORDER = ["ts", "instance", "status", "origin_status", "method", "host", "path", "query", "ip", "country",
     "duration_us", "bytes", "router", "service", "entrypoint", "protocol", "tls", "user_agent", "referer", "seq"];
   var BD_COLS = [   // [sort key, header, cell]
     ["requests", "Requests", function (r) { return BV.int(r.requests); }],
@@ -120,7 +120,7 @@
     status: "A code like 404, or a class like 4xx.",
     ip: "An address, an IPv4 range like 203.0.113.0/24, or a prefix like 2001:db8:*.",
     contains: "Matches anywhere, ignoring case.",
-    str: "Exact match. (none) matches requests without one.",
+    str: "Exact match. (none) matches requests without one. Countries by 2-letter code: US, DE, ZZ (unknown).",
     header: "Kept request headers only (Traefik's accessLog.fields.headers). Exact, or use * like paths.",
     num: "Milliseconds.",
   };
@@ -170,7 +170,7 @@
     state.filters.forEach(function (f, i) {
       var neg = f[1].charAt(0) === "!", value = neg ? f[1].slice(1) : f[1];
       var op = f[0] === "min_ms" || f[0] === "max_ms" ? "" : neg ? "is not" : "is";
-      var text = f[0] === "min_ms" || f[0] === "max_ms" ? value + " ms" : value;
+      var text = f[0] === "min_ms" || f[0] === "max_ms" ? value + " ms" : BV.display(f[0], value);
       box.appendChild(el("span", { class: "chip" + (neg ? " neg" : "") },
         el("span", { text: fieldLabel(f[0]) }), op ? el("span", { class: "op", text: op }) : null,
         el("span", { class: "val", title: value, text: text }),
@@ -248,6 +248,7 @@
             : split === "status_class" ? BV.statusClassColor(s.key)
             : split ? slots.color(s.key) : cssVar("--s1");
           var label = s.key === "all" ? MEASURES.find(function (m) { return m[0] === d.measure; })[1]
+            : split === "country" ? BV.display("country", s.key)
             : s.key === "p50" ? "p50 (median)" : s.key;
           return { key: s.key, label: label, color: color, values: s.values };
         });
@@ -312,7 +313,7 @@
       if (!d.rows.length) body.appendChild(el("tr", null, el("td", { colspan: 10, class: "hint", text: "No requests match." })));
       d.rows.forEach(function (r) {
         var name = el("td", { class: "name" + (d.by === "user_agent" ? "" : " mono") },
-          el("span", { title: r.value, text: d.by ? r.value : "All matching requests" }),
+          el("span", { title: r.value, text: d.by ? BV.display(d.by, r.value) : "All matching requests" }),
           d.by ? el("span", { class: "share" }, el("i", { style: "width:" + Math.max(1, Math.round(r.share * 100)) + "%" })) : null);
         var tr = el("tr", { "data-value": r.value }, name, cols.map(function (c) {
           return el("td", { class: "num", text: c[2](r, d) });
@@ -372,6 +373,8 @@
       else if (c[0] === "path") {
         var q = get("query");
         td = el("td", { class: "mono path", title: v + (q ? "?" + q : ""), text: (v || "") + (q ? "?" + q : "") });
+      } else if (c[0] === "country") {
+        td = el("td", { title: BV.countryName(v), text: v ? v : "–" });
       } else td = el("td", { class: c[0] === "ip" ? "mono" : "", text: v === null ? "–" : String(v) });
       tr.appendChild(td);
     });
@@ -530,6 +533,7 @@
         : name === "ts" ? new Date(v).toISOString().replace("T", " ").replace("Z", " UTC") + "  (" + BV.stamp(v, true) + " local)"
         : name === "duration_us" ? BV.dur(v) + "  (" + BV.int(v) + " µs)"
         : name === "bytes" ? BV.bytes(v) + "  (" + BV.int(v) + " bytes)"
+        : name === "country" ? BV.countryName(v) + "  (" + v + ")"
         : String(v);
       var canFilter = filterable(name) && v !== null && v !== undefined && name !== "query";
       row(fieldLabel(name === "ts" ? "Time" : name === "duration_us" ? "Duration" : name === "bytes" ? "Size" : name === "seq" ? "Sequence" : name),
@@ -569,6 +573,7 @@
     BV.initIngestStatus($("ingestDot"), $("ingestText"), $("statusBanner"));
     BV.api("/api/fields").then(function (m) {
       meta = m;
+      BV.credit($("credit"), m.geoip && m.geoip.attribution);
       readUrl();
       var measure = BV.clear($("measureSel")), split = BV.clear($("splitSel")), group = BV.clear($("groupSel"));
       MEASURES.forEach(function (x) { measure.appendChild(el("option", { value: x[0], text: x[1] })); });
@@ -635,6 +640,18 @@
         writeUrl(true);
         reloadAll();
       }
+    });
+    // CSV links are built when clicked, so a live range downloads the window on screen right now
+    $("vizCsv").addEventListener("click", function () {
+      this.href = "/api/export?" + (state.view === "breakdown"
+        ? apiParams({ kind: "breakdown", by: state.group || "none", sort: state.sort })
+        : apiParams({ kind: "series", measure: state.measure, buckets: buckets(),
+            split: SPLITTABLE[state.measure] ? state.split || null : null })).toString();
+    });
+    $("logsCsv").addEventListener("click", function () {
+      var extra = { kind: "logs" };
+      if (logs.jump) extra.to = logs.jump;          // looking at an earlier moment: export from there back
+      this.href = "/api/export?" + apiParams(extra).toString();
     });
     $("unseenBtn").addEventListener("click", function () {
       $("logWrap").scrollTo({ top: 0, behavior: "smooth" });

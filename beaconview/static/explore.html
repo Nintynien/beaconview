@@ -77,6 +77,7 @@
         <span class="spacer"></span>
         <span class="sub" id="vizSub"></span>
         <button class="btn ts-only" id="tableBtn" type="button" aria-pressed="false">Table</button>
+        <a class="btn" id="vizCsv" href="#" download title="Download what this panel shows, as CSV">CSV</a>
       </div>
       <div id="tsPanel" role="tabpanel" aria-labelledby="viewTs">
         <div class="legend" id="vizLegend" hidden></div>
@@ -95,6 +96,8 @@
         <span class="sub" id="logsSub"></span>
         <button class="btn" id="newestBtn" type="button" hidden>Back to newest</button>
         <button class="btn primary" id="unseenBtn" type="button" hidden></button>
+        <span class="spacer"></span>
+        <a class="btn" id="logsCsv" href="#" download title="Download every matching request (up to a million), as CSV">CSV</a>
       </div>
       <div class="more above"><button class="btn" id="newerBtn" type="button" hidden>Load newer</button></div>
       <div class="logwrap" id="logWrap">
@@ -106,6 +109,7 @@
       <div class="more"><button class="btn" id="moreBtn" type="button" hidden>Load older</button></div>
     </section>
   </main>
+  <footer class="credit" id="credit" hidden></footer>
 
   <div class="scrim" id="scrim" hidden></div>
   <aside class="drawer" id="drawer" hidden aria-labelledby="drawerTitle" role="dialog" aria-modal="true">

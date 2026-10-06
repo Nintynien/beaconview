@@ -7,7 +7,7 @@ A small, self-hosted request explorer for Traefik. It reads Traefik's JSON acces
 of every request in an embedded columnar database, and serves two pages: an overview of the whole proxy and an
 explorer for slicing requests by time, host, path, status, IP or user agent (chart on top, log lines below).
 
-Status: v0.1 (milestones 1–3 done, 4 in progress). The name is independent of the Traefik mark, so it also fits if
+Status: v0.2 (milestones 1–5 done). The name is independent of the Traefik mark, so it also fits if
 other proxies (Caddy, nginx JSON logs) are supported later. The README's first line says it reads access logs and
 adds no tracking, since "web beacon" also means a tracking pixel.
 
@@ -214,12 +214,24 @@ counts up every second between status checks (every 15 s), measured on the serve
 
 ### Overview (`/`)
 
+- **Highlights** (`/api/highlights`), above the tiles: the range (its last 24 h at most) against the same clock
+  window on each of the previous 7 days that have data. Per router from the rollups: a 5xx rate at least 3× usual
+  and 5 points higher (20+ errors), a p95 at least double and 100 ms slower; total traffic at 2× or half its usual
+  level; and from raw rows, the 20 busiest clients and paths that are new at this time of day or at 5× their usual.
+  Severity (critical / warning / note) shows as an icon and a word; each links into Explore with its filters. With
+  less than a day of history the card says when comparisons start. Refreshed with the slow tier.
 - **Tiles:** requests, req/s, unique IPs, 5xx rate, 4xx rate, p95, bytes sent — each with the change vs the
   previous period of the same length (rates in percentage points; red/green only where up is bad: error rates, p95).
 - **Chart:** requests over time stacked by status class (drag to zoom).
 - **Traffic by** router / service / host, sorted busiest, most 5xx or slowest p95 (`/api/breakdown`): req/s,
   requests, 4xx %, 5xx % (each linking to those requests), p50, p95, bytes.
 - **Top lists:** status codes, paths, client IPs, user agents, hosts; **recent 5xx** (10 newest).
+- **Countries** (with GeoIP on): a world map shaded in five log-scale steps of one blue ramp (no requests = neutral
+  surface), hover for the count, click into Explore; the busiest eight beside it as a table. Outlines are Natural
+  Earth 1:110m projected (Equal Earth) at build time by `tools/build_world.py` into `static/world.json` (80 KB, 26
+  KB gzipped), fetched only when the card shows. Places too small for that scale (Singapore, Hong Kong, ...) and
+  unknown addresses are listed under the map. Country is not a rollup dimension (it would multiply `minute_stats`
+  by the number of countries), so the card reads raw rows and refreshes with the slow tier.
 - Every value links into Explore with that filter and the same range; an instance picker appears when there is
   more than one log.
 - **Live** works as on Explore: every preset is live (default range: Last hour), pushed over
@@ -296,6 +308,8 @@ All JSON, all bounded by a time range, all results capped.
 | `GET /api/series?<filters>&buckets&measure&split` | time buckets × series; measure = requests, bytes, latency (p50/p95/p99), unique_ips, error_rate |
 | `GET /api/top?field&<filters>&limit` | top values with counts and share |
 | `GET /api/logs?<filters>&before=<ts:seq>&since=<ts:seq>&after=<seq>&limit` | log lines, newest first: older than `before`, the page just newer than `since`, or ingested after `after`; the first page carries the total match count |
+| `GET /api/highlights?<filters>` | what is unusual against the same time on earlier days: `{state: ready|learning, days, items: [{kind, severity, title, detail, filters}]}` |
+| `GET /api/export?kind=logs|breakdown|series&<filters>` | CSV attachment: matching requests (streamed, newest first, up to 1,000,000), a breakdown (up to 10,000 groups) or a chart's series; cells starting `= + - @` get a leading `'` |
 | `GET /api/fields` | filterable fields and their known values (hosts, routers, services) |
 | `GET /api/status` | ingest and storage health |
 | `GET /api/stream?kind=logs&<filters>` | SSE: new matching requests as they are written (`rows` events, id = seq) |
@@ -334,6 +348,7 @@ exact count.
 | `BACKFILL` | `0` | read rotated files on first run |
 | `CLIENT_IP_HEADER` | — | e.g. `CF-Connecting-IP` |
 | `ANONYMIZE_IPS` | `0` | |
+| `GEOIP` | `auto` | `auto` (DB-IP Country Lite, monthly, CC BY 4.0 credit shown), a `.mmdb` path, or `off` |
 | `DB_MEMORY_LIMIT` | `512MB` | DuckDB `memory_limit` |
 | `DB_THREADS` | `2` | DuckDB `threads` |
 | `BATCH_SECONDS` / `BATCH_ROWS` | `1` / `50000` | |
@@ -445,13 +460,15 @@ v2 adds remote Traefiks without a second codebase:
 4. **Publish:** backfill, anonymisation, built-in auth, settings page, live updates over SSE (*done 2026-10-06*);
    CI with an image smoke test and release tags, README with screenshots (from generated traffic, so no real visitor
    data), sizing table and Traefik config (*done*); first GHCR release (`v0.1.0`).
+5. **v0.2:** GeoIP (country column, filled on ingest and backfilled for older rows; Countries card and map), CSV
+   export from Explore, Overview highlights. *Done 2026-10-06: 88 backend and 23 browser tests.*
 
 ## Open questions
 
 - **Positioning:** "request explorer for Traefik" at launch, "for Traefik, Caddy and nginx" once those parsers ship.
 - **Multiple instances:** v2 as above, or sooner if wanted; v1 ships the `instance` column and local multi-file only.
 - **Rollup retention default:** 90 days enough?
-- **"Something unusual" on the Overview:** an IP at 10× its usual rate, a 5xx spike, a new top path; the strongest
-  candidate for the Overview's "tells you without being asked" role.
-- **GeoIP:** country per IP would fit the overview; v1 leaves it out (needs a MaxMind/DB-IP database the user
-  supplies). Candidate for v1.1.
+- **City-level locations:** an opt-in `GEOIP_LEVEL=city` (DB-IP City Lite, ~60 MB) adding latitude/longitude per
+  row and dots on the same map. Free city data is often wrong at that level, and it is more sensitive; not before
+  someone asks.
+- **Highlights thresholds:** fixed constants (`HL_*` in query.py) for now; settings if real traffic says so.

@@ -29,6 +29,20 @@ STEPS_S = (1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800,
 EXACT_UNIQUE_MAX_MS = 86_400_000      # longer ranges count unique IPs approximately (HyperLogLog)
 # what /api/series can chart; requests and bytes stack by a split, the rest are one measure per bucket
 MEASURES = ("requests", "bytes", "latency", "unique_ips", "error_rate")
+# highlights: what counts as unusual (see Runner.highlights)
+HL_DAYS = 7                            # baseline: the same clock window on each of the previous days
+HL_MAX_SPAN_MS = 86_400_000            # longer ranges are judged on their last 24 hours
+HL_TRAFFIC_MIN = 50                    # requests a baseline window needs before traffic levels are compared
+HL_ROUTER_MIN = 50                     # requests a router needs in the window before its errors/latency count
+HL_ERRORS_MIN = 20                     # 5xx a router needs before an error spike counts
+HL_LATENCY_MIN_US = 100_000            # a p95 must rise by at least this much (and double)
+HL_CLIENT_MIN = 100                    # requests a client needs before it can be unusual
+HL_PATH_MIN = 50                       # requests a path needs before it can be new or surging
+HL_TOP = 20                            # clients / paths examined (the busiest in the window)
+HL_MAX = 8                             # highlights shown
+EXPORT_MAX_ROWS = 1_000_000            # requests in one CSV export
+EXPORT_TIMEOUT_SECONDS = 600
+EXPORT_MAX_GROUPS = 10_000             # breakdown rows in one CSV export
 BREAKDOWN_SORTS = ("requests", "unique_ips", "status_4xx", "status_5xx", "errors", "p50", "p95", "bytes")
 
 # name -> (kind, raw column, rollup column or None, label)
@@ -44,6 +58,7 @@ FIELDS = {
     "status": ("status", "status", "status", "Status"),
     "origin_status": ("status", "origin_status", None, "Origin status"),
     "ip": ("ip", "ip", None, "Client IP"),
+    "country": ("str", "country", None, "Country"),        # ISO code from geoip.py; ZZ = looked up, unknown
     "user_agent": ("contains", "user_agent", None, "User agent"),
     "referer": ("contains", "referer", None, "Referer"),
     "protocol": ("str", "protocol", None, "Protocol"),
@@ -53,7 +68,7 @@ FIELDS = {
 SPLITS = ("status_class",) + tuple(FIELDS)
 LOG_COLUMNS = ("seq", "instance", "ts", "host", "method", "path", "query", "status", "origin_status", "duration_us",
                "bytes", "ip", "router", "service", "entrypoint", "protocol", "tls", "user_agent", "referer",
-               "headers")
+               "headers", "country")
 
 
 class BadQuery(ValueError):
@@ -388,7 +403,7 @@ class Runner:
     def top(self, q, field, limit=10):
         if field not in SPLITS:
             raise BadQuery(f"field: unknown field {field!r}")
-        limit = max(1, min(50, limit))
+        limit = max(1, min(300 if field == "country" else 50, limit))     # every country, for the map
         rollup = q.rollup_ok([field])
         table = "minute_stats" if rollup else "requests"
         count_expr = "sum(requests)" if rollup else "count(*)"
@@ -405,7 +420,7 @@ class Runner:
         }
 
     # -- /api/breakdown --------------------------------------------------
-    def breakdown(self, q, by, sort="requests", limit=20, with_unique=False):
+    def breakdown(self, q, by, sort="requests", limit=20, with_unique=False, export=False):
         """One row per value of `by` (None: a single row of totals): requests, req/s, 4xx, 5xx, bytes, p50/p95, and
         with `with_unique` distinct client IPs. From the rollups (percentiles from summed histograms) when the
         field and filters allow, from raw rows otherwise; unique IPs always read raw rows, but only for the groups
@@ -415,7 +430,9 @@ class Runner:
             raise BadQuery(f"by: unknown field {by!r}")
         if sort not in BREAKDOWN_SORTS:
             raise BadQuery(f"sort must be one of {', '.join(BREAKDOWN_SORTS)}")
-        limit = max(1, min(100, limit))
+        # pages show at most 100 groups ranked among the 200 busiest; a CSV export takes up to 10,000
+        candidates = EXPORT_MAX_GROUPS if export else 200
+        limit = max(1, min(EXPORT_MAX_GROUPS if export else 100, limit))
         rollup = q.rollup_ok([by] if by else [])
         key = _key_expr(by, rollup) if by else "'(all)'"
         w, p = where(q, rollup=rollup)
@@ -425,7 +442,7 @@ class Runner:
                            coalesce(sum(requests) FILTER (status BETWEEN 400 AND 499), 0)::BIGINT,
                            coalesce(sum(requests) FILTER (status >= 500), 0)::BIGINT, sum(bytes)::BIGINT,
                            max(duration_max_us), {", ".join(f"sum({c})::BIGINT" for c in HIST_COLUMNS)}
-                    FROM minute_stats WHERE {w} GROUP BY k ORDER BY n DESC, k LIMIT 200""", p)
+                    FROM minute_stats WHERE {w} GROUP BY k ORDER BY n DESC, k LIMIT {candidates}""", p)
             groups = []
             for r in rows:
                 p50, p95 = hist_quantiles(list(r[6:]), [0.5, 0.95], r[5])
@@ -435,7 +452,7 @@ class Runner:
                 f"""SELECT {key} k, count(*) n, count(*) FILTER (status BETWEEN 400 AND 499),
                            count(*) FILTER (status >= 500), sum(bytes)::BIGINT,
                            approx_quantile(duration_us, [0.5, 0.95])
-                    FROM requests WHERE {w} GROUP BY k ORDER BY n DESC, k LIMIT 200""", p)
+                    FROM requests WHERE {w} GROUP BY k ORDER BY n DESC, k LIMIT {candidates}""", p)
             groups = [[r[0], r[1], r[2], r[3], r[4]] + (list(r[5]) if r[5] else [None, None]) + [None] for r in rows]
         groups = [g for g in groups if g[1]]
         total = sum(g[1] for g in groups)
@@ -446,7 +463,11 @@ class Runner:
                 return
             rw, rp = where(q)
             distinct = "approx_count_distinct(ip)" if approx else "count(DISTINCT ip)"
-            if by:
+            if by and len(chosen) > 500:
+                # an export's thousands of groups: count every group rather than list them all in an IN (...)
+                raw_key = _key_expr(by, False)
+                found = dict(self.run(f"SELECT {raw_key} k, {distinct} FROM requests WHERE {rw} GROUP BY k", rp))
+            elif by:
                 raw_key = _key_expr(by, False)
                 keys = [g[0] for g in chosen]
                 found = dict(self.run(
@@ -545,6 +566,143 @@ class Runner:
             "newer": [rows[0][2], rows[0][0]] if more else None,
             "max_seq": max((r[0] for r in rows), default=None),
         }
+
+    # -- /api/highlights -------------------------------------------------
+    def highlights(self, q, oldest_ms=None):
+        """What is unusual right now: the window (its last 24 h at most) against the same clock window on each of the
+        previous HL_DAYS days that have data. Traffic level, errors and latency per router come from the rollups;
+        clients and paths from raw rows (the busiest HL_TOP of each only). Each highlight carries the filters that
+        show it in Explore. With no earlier day to compare against, the answer says when there will be one."""
+        to_ms = q.to_ms
+        from_ms = max(q.from_ms, to_ms - HL_MAX_SPAN_MS)
+        span = to_ms - from_ms
+        day = 86_400_000
+        days = [k for k in range(1, HL_DAYS + 1) if oldest_ms is not None and from_ms - k * day >= oldest_ms - 60_000]
+        out = {"from": from_ms, "to": to_ms, "days": len(days), "items": []}
+        if not days:
+            out["state"] = "learning"
+            out["ready_ms"] = (oldest_ms + day + span) if oldest_ms is not None else None
+            return out
+        out["state"] = "ready"
+        windows = [(from_ms - k * day, to_ms - k * day) for k in days]
+        items = out["items"]
+
+        # one rollup pass: per router, this window vs the baseline windows (counts, 5xx, histograms)
+        conds = q.conds
+        wide = Query(windows[-1][0], to_ms, conds)
+        w, p = where(wide, rollup=True)
+        base_sql = " OR ".join("(minute >= epoch_ms(?::BIGINT) AND minute < epoch_ms(?::BIGINT))" for _ in windows)
+        base_p = [v for win in windows for v in win]
+        cur_sql = "minute >= epoch_ms(?::BIGINT)"
+        hist = ", ".join(f"sum({c}) FILTER ({cur_sql})::BIGINT" for c in HIST_COLUMNS)
+        bhist = ", ".join(f"sum({c}) FILTER ({base_sql})::BIGINT" for c in HIST_COLUMNS)
+        rows = self.run(
+            f"""SELECT CASE WHEN router = '' THEN '(none)' ELSE router END r,
+                       coalesce(sum(requests) FILTER ({cur_sql}), 0)::BIGINT,
+                       coalesce(sum(requests) FILTER ({cur_sql} AND status >= 500), 0)::BIGINT,
+                       coalesce(sum(requests) FILTER ({base_sql}), 0)::BIGINT,
+                       coalesce(sum(requests) FILTER (({base_sql}) AND status >= 500), 0)::BIGINT,
+                       {hist}, {bhist}
+                FROM minute_stats WHERE {w} GROUP BY r""",
+            [from_ms] * 2 + base_p * 2 + [from_ms] * len(HIST_COLUMNS) + base_p * len(HIST_COLUMNS) + p)
+        n = len(HIST_COLUMNS)
+        total_cur = total_base = 0
+        for r in rows:
+            router, cur, cur5, base, base5 = r[:5]
+            total_cur += cur
+            total_base += base
+            base_avg = base / len(days)
+            if cur >= HL_ROUTER_MIN and cur5 >= HL_ERRORS_MIN:
+                rate, base_rate = cur5 / cur, (base5 / base if base else 0.0)
+                if rate >= max(3 * base_rate, base_rate + 0.05):
+                    items.append({
+                        "kind": "errors", "severity": "critical" if rate >= 0.2 else "warning",
+                        "title": f"{router}: {rate:.0%} server errors",
+                        "detail": f"{cur5:,} 5xx of {cur:,} requests; usually {base_rate:.1%} at this time",
+                        "filters": [["router", router], ["status", "5xx"]], "score": rate / max(base_rate, 0.005)})
+            if cur >= HL_ROUTER_MIN and base_avg >= HL_ROUTER_MIN:
+                p95 = hist_quantiles(list(r[5:5 + n]), [0.95])[0]
+                b95 = hist_quantiles(list(r[5 + n:5 + 2 * n]), [0.95])[0]
+                if p95 and b95 and p95 >= 2 * b95 and p95 - b95 >= HL_LATENCY_MIN_US:
+                    items.append({
+                        "kind": "latency", "severity": "warning",
+                        "title": f"{router}: p95 {p95 / 1000:,.0f} ms",
+                        "detail": f"usually {b95 / 1000:,.0f} ms at this time ({p95 / b95:.1f}× slower)",
+                        "filters": [["router", router]], "score": p95 / b95})
+
+        base_avg = total_base / len(days)
+        if base_avg >= HL_TRAFFIC_MIN:
+            ratio = total_cur / base_avg
+            if ratio >= 2:
+                items.append({"kind": "traffic", "severity": "warning",
+                              "title": f"Traffic {ratio:.1f}× its usual level",
+                              "detail": f"{total_cur:,} requests; usually about {base_avg:,.0f} at this time",
+                              "filters": [], "score": ratio})
+            elif ratio <= 0.5:
+                items.append({"kind": "traffic", "severity": "critical" if ratio <= 0.2 else "warning",
+                              "title": f"Traffic {1 - ratio:.0%} below usual",
+                              "detail": f"{total_cur:,} requests; usually about {base_avg:,.0f} at this time",
+                              "filters": [], "score": 1 / max(ratio, 0.01)})
+
+        # raw rows, busiest clients and paths only: this window vs their own baseline
+        raw_base = " OR ".join("(ts >= epoch_ms(?::BIGINT) AND ts < epoch_ms(?::BIGINT))" for _ in windows)
+        for field, label, minimum, kind in (("ip", "Client", HL_CLIENT_MIN, "client"),
+                                           ("path", "Path", HL_PATH_MIN, "path")):
+            w, p = where(Query(from_ms, to_ms, conds))
+            top = self.run(f"SELECT {field}, count(*) n FROM requests WHERE {w} AND {field} IS NOT NULL "
+                           f"GROUP BY 1 ORDER BY n DESC LIMIT {HL_TOP}", p)
+            top = [(k, c) for k, c in top if c >= minimum]
+            if not top:
+                continue
+            keys = [k for k, _ in top]
+            w, p = where(Query(windows[-1][0], windows[0][1], conds))
+            base = dict(self.run(f"SELECT {field}, count(*) FROM requests WHERE {w} AND ({raw_base}) AND {field} IN "
+                                 f"({', '.join('?' for _ in keys)}) GROUP BY 1", p + base_p + keys))
+            for key, cur in top:
+                share = cur / total_cur if total_cur else 0
+                usual = base.get(key, 0) / len(days)
+                if usual == 0 and share >= (0.05 if kind == "client" else 0.01):
+                    items.append({"kind": kind, "severity": "warning" if kind == "client" else "info",
+                                  "title": f"New {label.lower()} {key}",
+                                  "detail": f"{cur:,} requests ({share:.0%} of traffic), none at this time over the "
+                                            f"past {len(days)} day{'s' if len(days) > 1 else ''}",
+                                  "filters": [[field, key]], "score": share * 100})
+                elif usual > 0 and cur >= 5 * usual and share >= 0.02:
+                    items.append({"kind": kind, "severity": "warning" if kind == "client" else "info",
+                                  "title": f"{label} {key}: {cur / usual:.0f}× its usual requests",
+                                  "detail": f"{cur:,} requests ({share:.0%} of traffic); usually about {usual:,.0f}",
+                                  "filters": [[field, key]], "score": cur / usual})
+
+        rank = {"critical": 0, "warning": 1, "info": 2}
+        items.sort(key=lambda h: (rank[h["severity"]], -h["score"]))
+        for h in items:
+            h.pop("score")
+        del items[HL_MAX:]
+        return out
+
+    # -- /api/export -----------------------------------------------------
+    def export_logs(self, q, cap=EXPORT_MAX_ROWS):
+        """Every matching request, newest first, up to `cap`: yields lists of rows (EXPORT_COLUMNS order) so a large
+        export streams instead of sitting in memory. Gets a longer time limit than page queries."""
+        cur = self.store.reader()
+        timer = threading.Timer(EXPORT_TIMEOUT_SECONDS, cur.interrupt)
+        timer.start()
+        try:
+            w, p = where(q)
+            cur.execute(f"""SELECT epoch_ms(ts), instance, method, host, path, query, status, origin_status, duration_us,
+                                     bytes, ip, country, router, service, entrypoint, protocol, tls, user_agent,
+                                     referer, headers
+                              FROM requests WHERE {w} ORDER BY ts DESC, seq DESC LIMIT {int(cap)}""", p)
+            while True:
+                rows = cur.fetchmany(5000)
+                if not rows:
+                    return
+                yield rows
+        except duckdb.InterruptException:
+            raise QueryTimeout(f"the export took longer than {EXPORT_TIMEOUT_SECONDS} s; narrow the time range")
+        finally:
+            timer.cancel()
+            cur.close()
 
     # -- /api/fields -----------------------------------------------------
     def fields(self):

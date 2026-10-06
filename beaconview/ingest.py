@@ -23,6 +23,7 @@ log = logging.getLogger("beaconview.ingest")
 
 RETRY_SECONDS = 5.0
 RATE_WINDOW = 60.0                      # seconds the reported write rate covers
+FILL_SECONDS = 30.0                     # how often to look for stored rows still missing a country
 
 
 class Source:
@@ -61,13 +62,16 @@ class Source:
 
 
 class Ingestor(threading.Thread):
-    def __init__(self, cfg, store, clock=time.time, settings=None, hub=None):
+    def __init__(self, cfg, store, clock=time.time, settings=None, hub=None, geo=None):
         super().__init__(name="ingest", daemon=True)
         self.cfg = cfg
         self.store = store
         self.clock = clock
         self.settings = settings or Settings(cfg)
         self.hub = hub or Hub()                 # open streams wait on this (events.py)
+        self.geo = geo                          # GeoIP or None: country per row (geoip.py)
+        self.fill_at = 0.0                      # last pass filling in countries of older rows
+        self.countries_filled = 0
         saved = store.load_positions()
         self.sources = [Source(spec, cfg, saved.get(spec.instance), self.settings) for spec in cfg.sources]
         self.settings.listeners.append(self._settings_changed)
@@ -151,7 +155,7 @@ class Ingestor(threading.Thread):
                 src.expired += 1
                 continue
             self.seq += 1
-            batch.append((self.seq, src.instance) + row)
+            batch.append((self.seq, src.instance) + row + (self.geo.lookup(row[9]) if self.geo else None,))
             if newest is None or row[0] > newest:
                 newest = row[0]
         src.lines += len(lines)
@@ -286,6 +290,13 @@ class Ingestor(threading.Thread):
             if self.store.rollup(self._raw_cutoff()):
                 self.hub.publish_rollup()
             self.rollup_at = now
+        if self.geo is not None and self.geo.reader is not None and now - self.fill_at >= FILL_SECONDS:
+            # rows stored before the database arrived (or while it was off) get their country, a slice at a time
+            self.fill_at = now
+            ips = self.store.missing_country_ips()
+            if ips:
+                self.countries_filled += self.store.set_countries({ip: self.geo.lookup(ip) for ip in ips})
+                self.fill_at = 0.0          # more may be waiting: next round straight away
         if self.pruning or now >= self.prune_due:
             if not self.pruning:
                 self.pruning = True

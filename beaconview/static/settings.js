@@ -15,6 +15,7 @@
     BV.api("/api/status").then(function (s) {
       BV.skew = s.now_ms - Date.now();
       var ing = s.ingest, st = s.storage;
+      BV.credit($("credit"), s.geoip && s.geoip.attribution);
       var t = BV.clear($("logsTable"));
       t.appendChild(el("thead", null, el("tr", null, ["Instance", "File", "State", "Newest request", "Read", "Unreadable",
         "Rotations"].map(function (h, i) { return el("th", { class: i >= 4 ? "num" : "", text: h }); }))));
@@ -58,6 +59,12 @@
       fact(pr, "CPU time", BV.dur(s.process.cpu_s * 1e6));
       fact(pr, "Live connections", String(s.streams), s.streams === 1 ? "page receiving pushed updates" : "pages receiving pushed updates");
       if (ing.write_errors) fact(pr, "Write errors", BV.int(ing.write_errors), ing.last_error || "");
+      if (s.geoip) {
+        var g = s.geoip;
+        fact(pr, "Country lookup", g.source === "db-ip" ? "DB-IP country database" : g.source === "file" ? "your database" :
+          g.mode === "off" ? "off" : "waiting for the database",
+          g.error ? g.error : g.built_ms ? "built " + BV.day(g.built_ms) : "");
+      }
     }).catch(function (e) { showError(e.message); });
   }
 

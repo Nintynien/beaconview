@@ -7,6 +7,7 @@ import sys
 import threading
 
 from . import __version__, config
+from .geoip import GeoIP
 from .ingest import Ingestor
 from .server import App, make_server
 from .settings import Settings
@@ -31,7 +32,9 @@ def main():
     if settings.values != {k: getattr(cfg, k) for k in settings.values}:
         log.info("settings saved from the settings page: %s", {k: v for k, v in settings.values.items()
                                                                if v != getattr(cfg, k)})
-    ingestor = Ingestor(cfg, store, settings=settings)
+    geo = GeoIP(cfg.geoip, cfg.data_dir)
+    geo.start()
+    ingestor = Ingestor(cfg, store, settings=settings, geo=geo)
     ingestor.start()
     server = make_server(App(cfg, store, ingestor), port=cfg.port)
 
@@ -46,6 +49,7 @@ def main():
         server.serve_forever(poll_interval=0.5)
     finally:
         ingestor.hub.close()             # wake the open streams so they finish
+        geo.stop()
         ingestor.stop()
         ingestor.join(timeout=30)
         store.close()

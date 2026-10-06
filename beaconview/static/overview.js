@@ -196,26 +196,159 @@
   }
   function loadTop(field, table, card, quiet) {
     load("top-" + field, card, "/api/top", params({ field: field, limit: 8 }), function (d) {
-      var t = BV.clear(table), body = el("tbody");
-      if (!d.values.length) body.appendChild(el("tr", null, el("td", { class: "hint", text: "No requests in this range." })));
-      d.values.forEach(function (v) {
-        var name = v.value;
-        var cell = el("td", { class: "name" + (field === "user_agent" ? "" : " mono") });
-        if (field === "status") {
-          cell.appendChild(el("span", { class: "status" }, el("i", { style: "background:" + BV.statusColorVar(Number(v.value)) }),
-            link(name, exploreUrl([["status", v.value]]))));
-        } else {
-          cell.appendChild(link(name, exploreUrl([[field, v.value]]), v.value));
-        }
-        cell.appendChild(shareCell(v.share));
-        body.appendChild(el("tr", null, cell, el("td", { class: "num", text: BV.int(v.count) }),
-          el("td", { class: "num", text: BV.pct(v.share) })));
-      });
-      t.appendChild(body);
-      if (d.distinct > d.values.length) {
-        t.appendChild(el("tfoot", null, el("tr", null, el("td", { colspan: 3, class: "hint",
-          text: "≈ " + BV.int(d.distinct) + " distinct" }))));
+      renderTop(field, table, d, 8);
+    }, quiet);
+  }
+  function renderTop(field, table, d, n) {
+    var t = BV.clear(table), body = el("tbody"), shown = d.values.slice(0, n);
+    if (!shown.length) body.appendChild(el("tr", null, el("td", { class: "hint", text: "No requests in this range." })));
+    shown.forEach(function (v) {
+      var name = BV.display(field, v.value);
+      var cell = el("td", { class: "name" + (field === "user_agent" || field === "country" ? "" : " mono") });
+      if (field === "status") {
+        cell.appendChild(el("span", { class: "status" }, el("i", { style: "background:" + BV.statusColorVar(Number(v.value)) }),
+          link(name, exploreUrl([["status", v.value]]))));
+      } else {
+        cell.appendChild(link(name, exploreUrl([[field, v.value]]), v.value));
       }
+      cell.appendChild(shareCell(v.share));
+      body.appendChild(el("tr", null, cell, el("td", { class: "num", text: BV.int(v.count) }),
+        el("td", { class: "num", text: BV.pct(v.share) })));
+    });
+    t.appendChild(body);
+    if (d.distinct > shown.length) {
+      t.appendChild(el("tfoot", null, el("tr", null, el("td", { colspan: 3, class: "hint",
+        text: "≈ " + BV.int(d.distinct) + " distinct" }))));
+    }
+  }
+
+  /* ---------- countries map ---------- */
+  // Outlines are Natural Earth 1:110m (public domain), projected ahead of time by tools/build_world.py; fetched
+  // once, only when country lookup is on. Shading is one blue ramp in five steps on a log scale (a few countries
+  // usually dwarf the rest); no requests is the neutral surface. The table beside it is the same data in words.
+  var world = null, mapTip = null, mapCounts = {}, mapTotal = 0, tipCode = null, lastPointer = "mouse";
+  function worldShapes() {
+    if (!world) {
+      world = fetch("/static/world.json").then(function (r) {
+        if (!r.ok) throw new Error("world map: HTTP " + r.status);
+        return r.json();
+      });
+      world.catch(function () { world = null; });
+    }
+    return world;
+  }
+  function loadCountries(quiet) {
+    load("countries", $("countriesCard"), "/api/top", params({ field: "country", limit: 300 }), function (d) {
+      renderTop("country", $("countriesTable"), d, 8);
+      worldShapes().then(function (w) { renderMap(w, d); }, function (e) { errors.world = e.message; banner(); });
+    }, quiet);
+  }
+  function bounds(max) {                 // lower bound of each step: 1, then max^(k/5), whole and increasing
+    var out = [1];
+    for (var k = 1; k < 5; k++) {
+      var b = Math.ceil(Math.pow(max, k / 5));
+      if (b > out[out.length - 1]) out.push(b);
+    }
+    return out;
+  }
+  function renderMap(w, d) {
+    var box = $("countriesMap");
+    mapCounts = {}; mapTotal = d.total;
+    d.values.forEach(function (v) { mapCounts[v.value] = v.count; });
+    var max = 0;
+    Object.keys(w.countries).forEach(function (c) { max = Math.max(max, mapCounts[c] || 0); });
+    var b = bounds(Math.max(1, max)), offset = 5 - b.length;
+    var step = function (n) {
+      if (!n) return 0;
+      var i = 0;
+      while (i + 1 < b.length && n >= b[i + 1]) i++;
+      return offset + i + 1;
+    };
+    var svg = el("svg:svg", { class: "worldmap", viewBox: "0 0 " + w.width + " " + w.height, role: "img",
+      "aria-label": "Map of requests by country; the table beside it lists the busiest" });
+    Object.keys(w.countries).forEach(function (c) {
+      svg.appendChild(el("svg:path", { d: w.countries[c], class: "q" + step(mapCounts[c]), "data-c": c }));
+    });
+    svg.addEventListener("pointerdown", function (e) { lastPointer = e.pointerType; });
+    svg.addEventListener("mousemove", function (e) { if (lastPointer === "mouse") showTip(e); });
+    svg.addEventListener("mouseleave", hideTip);
+    svg.addEventListener("click", function (e) {
+      var code = e.target.getAttribute && e.target.getAttribute("data-c");
+      if (!code) { hideTip(); return; }
+      if (lastPointer !== "mouse" && tipCode !== code) { showTip(e); return; }    // touch: first tap explains
+      if (mapCounts[code]) location.href = exploreUrl([["country", code]]);
+    });
+    mapTip = el("div", { class: "tip", hidden: true, role: "status" });
+    var legend = el("div", { class: "legend maplegend" },
+      el("span", null, el("i", { style: "background:var(--q0)" }), "none"),
+      b.map(function (lo, i) {
+        var hi = i + 1 < b.length ? b[i + 1] - 1 : max;
+        return el("span", null, el("i", { style: "background:var(--q" + (offset + i + 1) + ")" }),
+          lo >= hi ? BV.int(lo) : BV.int(lo) + "–" + BV.int(hi));
+      }));
+    var off = d.values.filter(function (v) { return !w.countries[v.value] && v.value !== "ZZ" && v.value !== "(none)"; });
+    var unknown = d.values.filter(function (v) { return v.value === "ZZ"; })[0];
+    var notes = [];
+    if (off.length) notes.push("Too small for the map: " + off.slice(0, 4).map(function (v) {
+      return BV.countryName(v.value) + " " + BV.int(v.count);
+    }).join(" · ") + (off.length > 4 ? " · " + (off.length - 4) + " more" : ""));
+    if (unknown) notes.push("Unknown location: " + BV.int(unknown.count));
+    BV.clear(box);
+    BV.append(box, [svg, mapTip, legend, notes.length ? el("p", { class: "hint", text: notes.join(". ") + "." }) : null]);
+    tipCode = null;
+  }
+  function showTip(e) {
+    var code = e.target.getAttribute && e.target.getAttribute("data-c");
+    var svg = e.currentTarget;
+    svg.querySelectorAll("path.on").forEach(function (p) { if (p !== e.target) p.classList.remove("on"); });
+    if (!code) { hideTip(); return; }
+    if (tipCode !== code) {
+      e.target.classList.add("on");
+      svg.appendChild(e.target);                       // on top, so the outline is not hidden by neighbours
+      tipCode = code;
+      var n = mapCounts[code] || 0;
+      BV.clear(mapTip);
+      mapTip.appendChild(el("div", { class: "when", text: BV.countryName(code) }));
+      mapTip.appendChild(el("div", { class: "r" }, el("b", { text: BV.int(n) }),
+        el("span", { text: n ? "requests · " + BV.pct(mapTotal ? n / mapTotal : 0) : "requests" })));
+      mapTip.hidden = false;
+    }
+    var r = $("countriesMap").getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+    var tw = mapTip.offsetWidth;
+    mapTip.style.left = Math.max(0, Math.min(r.width - tw, x + 14 + tw > r.width ? x - tw - 14 : x + 14)) + "px";
+    mapTip.style.top = Math.max(0, y - 10) + "px";
+  }
+  function hideTip() {
+    tipCode = null;
+    if (mapTip) mapTip.hidden = true;
+    document.querySelectorAll("#countriesMap path.on").forEach(function (p) { p.classList.remove("on"); });
+  }
+  // what stands out against the same time on earlier days (the server judges the last 24 h of a longer range)
+  var SEVERITY = { critical: ["▲", "Critical"], warning: ["!", "Warning"], info: ["i", "Note"] };
+  function loadHighlights(quiet) {
+    load("highlights", $("highlightsCard"), "/api/highlights", params(), function (d) {
+      var list = BV.clear($("highlightsList")), sub = $("highlightsSub");
+      var w = win(), clipped = d.from > w.from + 60e3;
+      if (d.state === "learning") {
+        sub.textContent = "";
+        list.appendChild(el("li", { class: "hint", text: "Learning what normal looks like: highlights compare with the " +
+          "same time on earlier days" + (d.ready_ms ? ", so they start around " + BV.day(d.ready_ms) + " " +
+          BV.clock(d.ready_ms) : "") + "." }));
+        return;
+      }
+      sub.textContent = (clipped ? "Last 24 hours" : "This range") + " vs the same time on the past " + d.days +
+        " day" + (d.days === 1 ? "" : "s");
+      if (!d.items.length) {
+        list.appendChild(el("li", { class: "hint", text: "Nothing unusual." }));
+        return;
+      }
+      d.items.forEach(function (h) {
+        var sev = SEVERITY[h.severity] || SEVERITY.info;
+        var href = exploreUrl(h.filters, !clipped ? null : state.range ? { range: "24h" } : { from: Math.floor(d.from), to: Math.ceil(d.to) });
+        list.appendChild(el("li", { class: "sev-" + h.severity },
+          el("span", { class: "sev", title: sev[1] }, el("i", { "aria-hidden": "true", text: sev[0] }), sev[1]),
+          el("span", { class: "what" }, el("a", { href: href, text: h.title }), el("span", { class: "hint", text: h.detail }))));
+      });
     }, quiet);
   }
   function loadErrors(quiet) {
@@ -278,9 +411,11 @@
   // what scans raw rows: unique IPs in the tiles, the raw-field top lists
   function refreshSlow(quiet) {
     loadTiles(quiet);
+    loadHighlights(quiet);
     loadTop("path", $("pathsTable"), $("pathsCard"), quiet);
     loadTop("ip", $("ipsTable"), $("ipsCard"), quiet);
     loadTop("user_agent", $("uasTable"), $("uasCard"), quiet);
+    if (meta && meta.geoip && meta.geoip.active) loadCountries(quiet);
   }
   function intervals() {        // fastest refresh per tier, in ms: one bar's worth; raw scans no faster than 5 s
     var w = win(), fast = BV.cadence(w.to - w.from, buckets());
@@ -317,6 +452,8 @@
     readUrl();
     BV.api("/api/fields").then(function (m) {
       meta = m;
+      $("countriesCard").hidden = !(m.geoip && m.geoip.active);
+      BV.credit($("credit"), m.geoip && m.geoip.attribution);
       var sel = $("instanceSel");
       if (m.instances.length > 1) {
         sel.hidden = false;

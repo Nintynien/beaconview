@@ -118,3 +118,18 @@ def test_reading_the_log_keeps_its_place(site, page, errors):
     page.click("#unseenBtn")
     expect(page.locator("#unseenBtn")).to_be_hidden()
     assert errors == []
+
+
+def test_csv_buttons_carry_the_query(site, page, errors):
+    page.goto(site.base + "/explore?range=6h&status=2xx")
+    expect(page.locator("#tsChart svg path").first).to_be_visible()
+    with page.expect_download() as dl:
+        page.click("#logsCsv")
+    d = dl.value
+    assert "kind=logs" in d.url and "status=2xx" in d.url and d.suggested_filename.startswith("beaconview-logs-")
+    head = open(d.path(), encoding="utf-8").readline()
+    assert head.startswith("time_utc,instance,method") and "country" in head
+    with page.expect_download() as dl:
+        page.click("#vizCsv")
+    assert "kind=series" in dl.value.url
+    assert errors == []

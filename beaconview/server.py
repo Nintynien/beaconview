@@ -1,7 +1,9 @@
 """HTTP: the JSON API and the pages. Stdlib only, one thread per connection."""
 
 import base64
+import csv
 import gzip
+import io
 import hashlib
 import hmac
 import json
@@ -14,6 +16,7 @@ import sys
 import threading
 import time
 from collections import OrderedDict
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlencode, urlparse
 
@@ -117,6 +120,7 @@ class App:
             "streams": self.streams,
             "ingest": self.ingestor.status(),
             "storage": self.storage(),
+            "geoip": self.ingestor.geo.status() if self.ingestor.geo else None,
         }
 
     def static_file(self, name):
@@ -157,6 +161,8 @@ class App:
             {"label": "Logs", "env": "ACCESS_LOG / ACCESS_LOGS",
              "value": ", ".join(f"{s.instance}: {s.path} ({s.format})" for s in c.sources)},
             {"label": "Read rotated logs on first start", "env": "BACKFILL", "value": "on" if c.backfill else "off"},
+            {"label": "Country lookup", "env": "GEOIP",
+             "value": {"auto": "auto (DB-IP's free database, refreshed monthly)", "off": "off"}.get(c.geoip, c.geoip)},
             {"label": "Data directory", "env": "DATA_DIR", "value": c.data_dir},
             {"label": "Database memory limit", "env": "DB_MEMORY_LIMIT", "value": c.db_memory_limit},
             {"label": "Database threads", "env": "DB_THREADS", "value": str(c.db_threads)},
@@ -393,9 +399,15 @@ class Handler(BaseHTTPRequestHandler):
                                      "rollup_days": self.app.settings.rollup_retention_days}
                 st = self.app.storage()
                 body["data"] = {"oldest_ms": st["oldest_ms"], "newest_ms": st["newest_ms"]}
+                geo = self.app.ingestor.geo
+                body["geoip"] = {"active": bool(geo and geo.reader), "attribution": geo.attribution if geo else None}
                 self.send_json(body)
                 return
-            if path not in ("/api/summary", "/api/series", "/api/breakdown", "/api/top", "/api/logs"):
+            if path == "/api/export":
+                self.export(params)
+                return
+            if path not in ("/api/summary", "/api/series", "/api/breakdown", "/api/top", "/api/logs",
+                            "/api/highlights"):
                 self.send_json({"error": "not found"}, 404)
                 return
             q = query.parse(params)
@@ -411,6 +423,63 @@ class Handler(BaseHTTPRequestHandler):
         except query.QueryTimeout as e:
             self.send_json({"error": str(e)}, 504)
 
+    def export(self, params):
+        """CSV of what a page shows, with the same filters: kind=logs (every matching request, streamed, up to
+        EXPORT_MAX_ROWS), kind=breakdown (by=, sort=; up to EXPORT_MAX_GROUPS groups) or kind=series (measure=,
+        split=, buckets=). Text that would start a spreadsheet formula gets a leading ' (visitors control paths
+        and user agents, and a CSV is often opened in Excel)."""
+        kind = params.get("kind", ["logs"])[0]
+        q = query.parse(params)
+        runner = self.app.runner
+        if kind == "logs":
+            header = ["time_utc", "instance", "method", "host", "path", "query", "status", "origin_status",
+                      "duration_ms", "bytes", "client_ip", "country", "router", "service", "entrypoint", "protocol",
+                      "tls", "user_agent", "referer", "headers"]
+
+            def chunks():
+                for rows in runner.export_logs(q):
+                    yield [[_iso(r[0])] + list(r[1:8]) + [None if r[8] is None else r[8] / 1000] + list(r[9:])
+                           for r in rows]
+        elif kind == "breakdown":
+            by = params.get("by", ["host"])[0]
+            d = runner.breakdown(q, None if by in ("", "none") else by, sort=params.get("sort", ["requests"])[0],
+                                 limit=query.EXPORT_MAX_GROUPS, with_unique=True, export=True)
+            header = [by if d["by"] else "all", "requests", "requests_per_sec", "share", "unique_ips", "status_4xx",
+                      "status_5xx", "p50_ms", "p95_ms", "bytes"]
+            rows = [[r["value"], r["requests"], r["rps"], r["share"], r["unique_ips"], r["status_4xx"], r["status_5xx"],
+                     _ms(r["p50_us"]), _ms(r["p95_us"]), r["bytes"]] for r in d["rows"]]
+            chunks = lambda: iter([rows])  # noqa: E731
+        elif kind == "series":
+            d = runner.series(q, buckets=_int(params, "buckets", 120), split=params.get("split", [None])[0] or None,
+                              measure=params.get("measure", ["requests"])[0])
+            header = ["bucket_start_utc"] + [s["key"] for s in d["series"]]
+            rows = [[_iso(d["start"] + i * d["step"])] + [s["values"][i] for s in d["series"]] for i in range(d["buckets"])]
+            chunks = lambda: iter([rows])  # noqa: E731
+        else:
+            raise query.BadQuery("kind must be logs, breakdown or series")
+        name = f"beaconview-{kind}-{_stamp(q.from_ms)}-{_stamp(q.to_ms)}.csv"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/csv; charset=utf-8")
+        self.send_header("Content-Disposition", f'attachment; filename="{name}"')
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Connection", "close")        # streamed: no Content-Length, the end is the close
+        self.end_headers()
+        self.close_connection = True
+        buf = io.StringIO()
+        out = csv.writer(buf)
+        out.writerow(header)
+        try:
+            for rows in chunks():
+                out.writerows([[_cell(v) for v in row] for row in rows])
+                self.wfile.write(buf.getvalue().encode("utf-8"))
+                buf.seek(0)
+                buf.truncate()
+            self.wfile.write(buf.getvalue().encode("utf-8"))
+        except query.QueryTimeout as e:
+            # headers are gone already: say so in the file rather than end it silently
+            self.wfile.write(f"\n# export stopped: {e}\n".encode("utf-8"))
+
     def answer(self, path, q, params):
         runner = self.app.runner
         if path == "/api/summary":
@@ -422,6 +491,8 @@ class Handler(BaseHTTPRequestHandler):
             by = params.get("by", ["service"])[0]
             return runner.breakdown(q, None if by in ("", "none") else by, sort=params.get("sort", ["requests"])[0],
                                     limit=_int(params, "limit", 20), with_unique=params.get("unique", [""])[0] == "1")
+        if path == "/api/highlights":
+            return runner.highlights(q, oldest_ms=self.app.storage()["oldest_ms"])
         if path == "/api/top":
             return runner.top(q, params.get("field", ["path"])[0], limit=_int(params, "limit", 10))
         after = params.get("after", [None])[0]
@@ -471,6 +542,24 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
+
+
+def _cell(v):
+    if isinstance(v, str) and v[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + v                                   # would run as a formula in a spreadsheet
+    return v
+
+
+def _iso(ms):
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
+def _stamp(ms):
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y%m%d-%H%M")
+
+
+def _ms(us):
+    return None if us is None else round(us / 1000, 3)
 
 
 def _cursor(params, name):

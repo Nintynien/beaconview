@@ -120,6 +120,27 @@ window.BV = BV;
     return (Math.round(h / 24 * 10) / 10) + " days";
   };
 
+  /* ---------- countries ---------- */
+  // ISO codes from the server, names from the browser's own list (no table to ship). ZZ: looked up, not found.
+  var regionNames = null;
+  try { regionNames = new Intl.DisplayNames(["en"], { type: "region" }); } catch (e) { regionNames = null; }
+  BV.countryName = function (code) {
+    if (!code || code === "(none)") return "–";
+    if (code === "ZZ") return "Unknown";
+    try { return (regionNames && regionNames.of(code)) || code; } catch (e) { return code; }
+  };
+  // a value as people should read it: country codes become names, everything else as it is
+  BV.display = function (field, value) {
+    return field === "country" && value !== "Other" ? BV.countryName(value) : value;
+  };
+  // the credit DB-IP's licence asks for on pages that show its results (CC BY 4.0)
+  BV.credit = function (node, attribution) {
+    if (!node) return;
+    node.hidden = !attribution;
+    BV.clear(node);
+    if (attribution) node.appendChild(BV.el("a", { href: attribution.url, text: attribution.text, rel: "noopener" }));
+  };
+
   /* ---------- colors ---------- */
   var css = function (name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); };
   BV.statusClassColor = function (key) {

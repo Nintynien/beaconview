@@ -27,9 +27,10 @@ _CSV_TYPES = {
     "path": "VARCHAR", "query": "VARCHAR", "status": "USMALLINT", "origin_status": "USMALLINT",
     "duration_us": "BIGINT", "bytes": "BIGINT", "ip": "VARCHAR", "router": "VARCHAR", "service": "VARCHAR",
     "entrypoint": "VARCHAR", "protocol": "VARCHAR", "tls": "VARCHAR", "user_agent": "VARCHAR",
-    "referer": "VARCHAR", "headers": "VARCHAR",
+    "referer": "VARCHAR", "headers": "VARCHAR", "country": "VARCHAR",
 }
-_CSV_COLUMNS = ("seq", "instance") + COLUMNS
+# the parser's row, then what ingest adds: the country (geoip.py; None without a database)
+_CSV_COLUMNS = ("seq", "instance") + COLUMNS + ("country",)
 assert set(_CSV_COLUMNS) == set(_CSV_TYPES)
 _CSV_SPEC = "{" + ", ".join(f"'{c}': '{_CSV_TYPES[c]}'" for c in _CSV_COLUMNS) + "}"
 
@@ -92,7 +93,9 @@ _DDL = [
         status USMALLINT, origin_status USMALLINT, duration_us BIGINT, bytes BIGINT,
         ip VARCHAR, router VARCHAR, service VARCHAR, entrypoint VARCHAR,
         protocol VARCHAR, tls VARCHAR, user_agent VARCHAR, referer VARCHAR,
-        headers JSON)""",
+        headers JSON, country VARCHAR)""",
+    # databases from before v0.2 (the column arrived with GeoIP)
+    "ALTER TABLE requests ADD COLUMN IF NOT EXISTS country VARCHAR",
     # Derived from requests, recomputed per dirty minute (see rollup()); '' stands for "none" so rows group.
     """CREATE TABLE IF NOT EXISTS minute_stats (
         minute TIMESTAMP NOT NULL, instance VARCHAR NOT NULL, host VARCHAR NOT NULL, router VARCHAR NOT NULL,
@@ -176,7 +179,9 @@ class Store:
             tmp = os.path.join(self.tmp_dir, "batch.csv")
             with open(tmp, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
-                writer.writerows([NULL if v is None else v for v in row] for row in rows)
+                width = len(_CSV_COLUMNS)
+                writer.writerows([NULL if v is None else v for v in (row if len(row) == width else row + (None,))]
+                                 for row in rows)
             minutes = sorted({row[2] // 60000 * 60000 for row in rows})
         self.w.execute("BEGIN")
         try:
@@ -185,7 +190,7 @@ class Store:
                     f"""INSERT INTO requests
                         SELECT seq, instance, epoch_ms(ts_ms), host, method, path, query, status, origin_status,
                                duration_us, bytes, ip, router, service, entrypoint, protocol, tls, user_agent,
-                               referer, headers::JSON
+                               referer, headers::JSON, country
                         FROM read_csv(?, header = false, delim = ',', quote = '"', escape = '"',
                                       nullstr = ?, columns = {_CSV_SPEC})""",
                     [tmp, NULL])
@@ -201,6 +206,24 @@ class Store:
             raise
         if rows and self._oldest_ms is not None:
             self._oldest_ms = min(self._oldest_ms, minutes[0])
+
+    def missing_country_ips(self, limit=20_000):
+        """Client IPs of stored requests that have no country yet (stored before a GeoIP database was available)."""
+        return [r[0] for r in self.w.execute(
+            "SELECT DISTINCT ip FROM requests WHERE country IS NULL AND ip IS NOT NULL LIMIT ?", [limit]).fetchall()]
+
+    def set_countries(self, by_ip):
+        """Fill in the country of stored requests from {ip: code}; returns the number of IPs given."""
+        if not by_ip:
+            return 0
+        tmp = os.path.join(self.tmp_dir, "countries.csv")
+        with open(tmp, "w", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerows(by_ip.items())
+        self.w.execute(
+            """UPDATE requests SET country = m.country
+               FROM read_csv(?, header = false, columns = {'ip': 'VARCHAR', 'country': 'VARCHAR'}) m
+               WHERE requests.ip = m.ip AND requests.country IS NULL""", [tmp])
+        return len(by_ip)
 
     def rollup(self, raw_cutoff_ms=None):
         """Recompute minute_stats for every dirty minute from the raw rows. Returns the number of minutes redone.

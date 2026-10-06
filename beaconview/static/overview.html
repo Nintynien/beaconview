@@ -44,6 +44,10 @@
 
     <div class="banner" id="statusBanner" role="status" hidden></div>
     <div class="banner error" id="banner" hidden></div>
+    <section class="card highlights" id="highlightsCard" aria-labelledby="highlightsTitle">
+      <div class="head"><h2 id="highlightsTitle">Highlights</h2><span class="sub" id="highlightsSub"></span></div>
+      <ul class="hl" id="highlightsList"></ul>
+    </section>
     <section class="tiles" id="tiles" aria-label="Summary"></section>
 
     <div class="grid">
@@ -78,6 +82,18 @@
         <div class="tablewrap"><table class="plain" id="servicesTable"></table></div>
       </section>
 
+      <section class="card wide" id="countriesCard" aria-labelledby="countriesTitle" hidden>
+        <div class="head">
+          <h2 id="countriesTitle">Countries</h2>
+          <span class="sub">requests by client location</span>
+          <span class="spacer"></span>
+          <a class="go" data-top="country">Explore →</a>
+        </div>
+        <div class="geo">
+          <div class="map" id="countriesMap"></div>
+          <table class="plain" id="countriesTable"></table>
+        </div>
+      </section>
       <section class="card" id="statusCard"><div class="head"><h2>Status codes</h2><span class="spacer"></span><a class="go" data-top="status">Explore →</a></div><table class="plain" id="statusTable"></table></section>
       <section class="card" id="pathsCard"><div class="head"><h2>Paths</h2><span class="spacer"></span><a class="go" data-top="path">Explore →</a></div><table class="plain" id="pathsTable"></table></section>
       <section class="card" id="ipsCard"><div class="head"><h2>Client IPs</h2><span class="spacer"></span><a class="go" data-top="ip">Explore →</a></div><table class="plain" id="ipsTable"></table></section>
@@ -95,6 +111,7 @@
       </section>
     </div>
   </main>
+  <footer class="credit" id="credit" hidden></footer>
 
   <script src="/static/common.js"></script>
   <script src="/static/chart.js"></script>

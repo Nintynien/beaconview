@@ -27,6 +27,19 @@ from beaconview.store import Store  # noqa: E402
 HISTORY_LINES = 6000
 
 
+class FakeGeo:
+    """Stands in for GeoIP (no download in tests): a country from the IP's last digit, credited like DB-IP."""
+    reader = True
+    attribution = {"text": "IP Geolocation by DB-IP", "url": "https://db-ip.com"}
+
+    def lookup(self, ip):
+        return ("US", "DE", "FR", "JP", "BR", "ZZ")[int(ip[-1]) % 6] if ip and ip[-1].isdigit() else None
+
+    def status(self):
+        return {"mode": "auto", "source": "db-ip", "path": None, "error": None, "built_ms": None, "checked_ms": None,
+                "attribution": self.attribution}
+
+
 class Site:
     def __init__(self, base, log, app):
         self.base, self.log, self.app = base, log, app
@@ -62,7 +75,7 @@ def site(tmp_path_factory):
     store = Store(cfg.db_path, "256MB", 2)
     # ROLLUP_RETENTION_DAYS "set in the environment", so the settings page shows a locked field
     settings = Settings(cfg, {"ROLLUP_RETENTION_DAYS": "90"}, store)
-    ing = Ingestor(cfg, store, settings=settings)
+    ing = Ingestor(cfg, store, settings=settings, geo=FakeGeo())
     ing.start()
     app = App(cfg, store, ing)
     server = make_server(app, host="127.0.0.1", port=0)

@@ -7,13 +7,15 @@ unaffected.
 
 ![The Overview: a day of traffic by status, per router, top paths and clients](docs/screenshots/overview.png)
 
-> **Status: early (v0.1).** Built for one Traefik host with a handful of people looking at it. See
+> **Status: early (v0.2).** Built for one Traefik host with a handful of people looking at it. See
 > [the design notes](docs/design.md) for how it works and what is planned.
 
 ## What it does
 
-- **Overview** — the whole proxy at a glance: requests, unique IPs, error rates and p95 latency against the previous
-  period; traffic by router, service or host; top status codes, paths, client IPs and user agents; the latest server
+- **Overview** — the whole proxy at a glance: **highlights** of what is unusual against the same time on earlier days
+  (a router's 5xx or latency spiking, traffic well above or below its usual level, a new or surging client or
+  path); requests, unique IPs, error rates and p95 latency against the previous period; traffic by router, service
+  or host; a **map of client countries**; top status codes, paths, client IPs and user agents; the latest server
   errors. Every value links into Explore.
 - **Explore** — ask a question: filter by host, path (`/api/*`), status (`4xx`, `!304`), client IP or range, user
   agent, duration or any header Traefik keeps. See it over time (requests, bytes, response time p50/p95/p99, unique
@@ -22,6 +24,8 @@ unaffected.
 - **Live** — the preset ranges stay current, pushed from the server as requests are written: "Last 5 minutes"
   scrolls with new 2-second bars, "Last hour" adds a bar a minute, and new requests appear in the log about a second
   after Traefik logs them. Pause freezes the window as a fixed range you can share.
+- **CSV export** — the requests behind any Explore view (up to a million rows, streamed), its chart, or its
+  breakdown, with the same filters. Values a spreadsheet would run as formulas are escaped.
 - **Settings** — what is being read and how far along, database size, and retention or IP handling you can change
   while it runs.
 
@@ -70,7 +74,7 @@ volumes:
 **3. Put it behind authentication** (below), route it through Traefik, and open it.
 [docker-compose.example.yml](docker-compose.example.yml) has the full version with Traefik labels and basic auth.
 
-Images: `:latest` is the newest release, `:0.1` / `:0.1.0` pin one, `:edge` follows the main branch.
+Images: `:latest` is the newest release, `:0.2` / `:0.2.0` pin one, `:edge` follows the main branch.
 Both `linux/amd64` and `linux/arm64`.
 
 ## Authentication
@@ -99,6 +103,7 @@ data is kept, so **put it behind authentication before anyone else can reach it*
 | `BACKFILL` | `0` | on first start, also read the rotated logs already on disk (`access.log.1`, `.gz` files) |
 | `CLIENT_IP_HEADER` | | e.g. `CF-Connecting-IP` behind Cloudflare (Traefik must keep that header) |
 | `ANONYMIZE_IPS` | `0` | store /24 (IPv4) and /48 (IPv6) networks instead of addresses |
+| `GEOIP` | `auto` | country per client IP: `auto` downloads DB-IP's free database monthly, a path uses your own `.mmdb` (e.g. MaxMind GeoLite2-Country), `off` turns it off |
 | `DB_MEMORY_LIMIT` | `512MB` | DuckDB's memory cap |
 | `DB_THREADS` | `2` | DuckDB's threads; more makes long-range queries faster |
 | `BASIC_AUTH_USER` / `BASIC_AUTH_PASSWORD` | | optional built-in authentication |
@@ -108,6 +113,16 @@ data is kept, so **put it behind authentication before anyone else can reach it*
 Retention, the client IP header and IP anonymization can also be changed on the **Settings** page while BeaconView
 runs. A value set by an environment variable wins and is shown locked there, so your compose file stays the source
 of truth for whatever it sets; the rest are saved in BeaconView's database.
+
+### Countries
+
+With `GEOIP=auto` BeaconView downloads DB-IP's free *IP to Country Lite* database (about 8 MB, refreshed monthly)
+into `DATA_DIR/geoip` and looks up each client IP **on your machine**: no visitor IP is ever sent anywhere, the only
+network traffic is that monthly download from `download.db-ip.com`. If the download fails, ingest carries on without
+countries and fills them in once the database arrives. DB-IP's licence (CC BY 4.0) asks for a credit on pages that
+show its results, so those pages carry a small "IP Geolocation by DB-IP" link; with your own database (`GEOIP=` a
+path) there is none. Countries are by ISO code (`country=US` in a filter); `ZZ` is a private or unknown address.
+The map's outlines are [Natural Earth](https://www.naturalearthdata.com/) (public domain), shipped in the image.
 
 ## How much disk and memory
 
@@ -126,12 +141,15 @@ CPU core, and catches up on a backlog at 40,000–55,000 lines/s.
 
 ## Limitations
 
-v0.1 is deliberately small. What it does not do yet:
+BeaconView is deliberately small. What it does not do yet:
 
 - **One Traefik host.** It reads log files on the machine it runs on (several logs there are fine, via
   `ACCESS_LOGS`). Collecting from Traefik on other machines is planned (an agent mode of the same image), not built.
 - **Traefik's JSON access log only.** Caddy and nginx JSON formats are planned; Traefik's text (CLF) format is not.
-- **No alerting.** It shows you what happened; it does not page you. Pair it with your monitoring for that.
+- **No alerting.** Highlights show what is unusual when you look; nothing pages you. Pair it with your monitoring
+  for that.
+- **Country, not city.** Locations are per country; the free city databases are large and often wrong at that
+  level.
 - **A handful of viewers.** Built for a team, not a public dashboard: live updates hold one connection per open
   tab (up to 50, then pages fall back to polling), and every query runs in the one container.
 - **No user accounts.** Authentication is your proxy's job (see above); everyone who gets in sees everything.
@@ -150,8 +168,9 @@ histograms for fast long-range charts, and prunes old data; a small HTTP server 
 pushes live updates with Server-Sent Events. Details, measurements and the reasoning behind each choice are in
 [docs/design.md](docs/design.md).
 
-The JSON API the pages use is yours too: `/api/summary`, `/api/series`, `/api/breakdown`, `/api/top`, `/api/logs`
-(filters as URL parameters, the same as an Explore link), `/api/status`, and `/api/stream` for live updates.
+The JSON API the pages use is yours too: `/api/summary`, `/api/series`, `/api/breakdown`, `/api/top`, `/api/logs`,
+`/api/highlights` (filters as URL parameters, the same as an Explore link), `/api/export` for CSV, `/api/status`,
+and `/api/stream` for live updates.
 
 ## Development
 
@@ -163,6 +182,7 @@ python tools/genlog.py ./demo/access.log --realistic --rate 20 --history 6 --sec
 ACCESS_LOG=./demo/access.log DATA_DIR=./demo/data BEACONVIEW_DEV=1 .venv/bin/python -m beaconview
 python tools/smoke.py http://127.0.0.1:8080 <rows>         # what CI checks against the built image
 python tools/bench.py ./bench.duckdb --days 7 --rate 300    # storage and query timings
+python tools/build_world.py ne_110m_admin_0_countries.geojson   # rebuild the map outlines (static/world.json)
 ```
 
 `BEACONVIEW_DEV=1` serves the files under `beaconview/static/` fresh on every request, so page edits show on reload.

@@ -84,6 +84,7 @@ a { color: var(--accent-ink); }
   border: 1px solid var(--ring); background: var(--surface); cursor: pointer; white-space: nowrap;
 }
 .btn:hover { background: var(--surface-2); }
+a.btn { text-decoration: none; color: var(--ink); }
 .btn:focus-visible, .chip button:focus-visible, select:focus-visible, input:focus-visible, .chart:focus-visible,
 .rows tr:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
@@ -291,3 +292,37 @@ table.kv th { color: var(--ink-2); font-weight: 500; }
 }
 a.ingest { text-decoration: none; }
 a.ingest:hover .txt { text-decoration: underline; }
+
+footer.credit { max-width: 1600px; margin: -24px auto 24px; padding: 0 24px; font-size: 12px; color: var(--muted); }
+footer.credit a { color: var(--muted); }
+
+/* highlights: severity carries an icon and a word, never color alone */
+.card.highlights { margin-bottom: 16px; }
+.card.highlights .head { margin-bottom: 8px; }
+ul.hl { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+ul.hl li { display: flex; gap: 12px; align-items: baseline; }
+ul.hl .sev { flex: none; width: 76px; font-size: 12px; color: var(--ink-2); display: inline-flex; align-items: center; gap: 6px; }
+ul.hl .sev i { font-style: normal; font-weight: 700; font-size: 10px; width: 16px; height: 16px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center; color: #fff; background: var(--muted); }
+ul.hl .sev-critical .sev i { background: var(--critical); }
+ul.hl .sev-warning .sev i { background: var(--warning); color: #1a1a19; }
+ul.hl .what { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; min-width: 0; }
+ul.hl .what a { font-weight: 600; overflow-wrap: anywhere; }
+
+/* countries map: one blue ramp (validated sequential steps), lightest = fewest; the neutral surface = none */
+:root { --q0: #f0efec; --q1: #b7d3f6; --q2: #86b6ef; --q3: #5598e7; --q4: #2a78d6; --q5: #184f95; }
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) { --q0: #2c2c2a; --q1: #104281; --q2: #1c5cab; --q3: #2a78d6; --q4: #5598e7; --q5: #9ec5f4; }
+}
+:root[data-theme="dark"] { --q0: #2c2c2a; --q1: #104281; --q2: #1c5cab; --q3: #2a78d6; --q4: #5598e7; --q5: #9ec5f4; }
+.geo { display: grid; grid-template-columns: minmax(0, 2fr) minmax(240px, 1fr); gap: 16px; align-items: start; }
+@media (max-width: 760px) { .geo { grid-template-columns: minmax(0, 1fr); } }
+.geo .map { position: relative; min-width: 0; }
+.worldmap { display: block; width: 100%; height: auto; }
+.worldmap path { fill: var(--q0); stroke: var(--surface); stroke-width: .6; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.worldmap path.q1 { fill: var(--q1); } .worldmap path.q2 { fill: var(--q2); } .worldmap path.q3 { fill: var(--q3); }
+.worldmap path.q4 { fill: var(--q4); } .worldmap path.q5 { fill: var(--q5); }
+.worldmap path:not(.q0) { cursor: pointer; }
+.worldmap path.on { stroke: var(--ink); stroke-width: 1.5; }
+.legend.maplegend { margin: 8px 0 0; font-variant-numeric: tabular-nums; }
+.geo .map > .hint { margin: 6px 0 0; }

@@ -28,6 +28,7 @@ class Config:
     client_ip_header: str = ""
     anonymize_ips: bool = False
     backfill: bool = False
+    geoip: str = "auto"
     db_memory_limit: str = "512MB"
     db_threads: int = 2
     batch_seconds: float = 1.0
@@ -111,6 +112,7 @@ def load(env=None):
         client_ip_header=env.get("CLIENT_IP_HEADER", "").strip(),
         anonymize_ips=_flag(env, "ANONYMIZE_IPS"),
         backfill=_flag(env, "BACKFILL"),
+        geoip=env.get("GEOIP", "").strip() or "auto",
         db_memory_limit=env.get("DB_MEMORY_LIMIT", "").strip() or "512MB",
         db_threads=_num(env, "DB_THREADS", 2, int, 1),
         batch_seconds=_num(env, "BATCH_SECONDS", 1.0, minimum=0.05),
