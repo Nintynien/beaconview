@@ -1,6 +1,7 @@
 name: Build & Push
 
-# Every push and pull request: tests, then the image is built and smoke-tested against a generated log.
+# Every push and pull request: tests, then (in parallel) browser tests in headless Chromium and the image built and
+# smoke-tested against a generated log.
 # Pushes to main publish ghcr.io/<owner>/beaconview:edge (and :sha-<commit>); a version tag (git tag v0.1.0)
 # publishes :0.1.0, :0.1 and :latest, so people pulling :latest get releases, not every commit.
 
@@ -29,7 +30,27 @@ jobs:
       - name: Run the test suite
         run: |
           pip install -r requirements.txt pytest
-          python -m pytest
+          python -m pytest --ignore=tests/ui
+
+  ui:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install Playwright and Chromium
+        run: |
+          pip install -r requirements-dev.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Browser tests
+        run: python -m pytest tests/ui
 
   smoke:
     needs: test
@@ -59,7 +80,7 @@ jobs:
         run: docker logs bv || true
 
   build:
-    needs: smoke
+    needs: [smoke, ui]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:

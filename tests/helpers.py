@@ -2,6 +2,8 @@ import json
 import time
 from datetime import datetime, timezone
 
+from beaconview import config
+
 
 def iso(ms):
     """epoch ms -> Traefik's StartUTC (nanosecond fraction, Z)."""
@@ -69,3 +71,17 @@ def wait_for(predicate, timeout=10.0, step=0.05):
             return True
         time.sleep(step)
     return predicate()
+
+
+def make_cfg(tmp_path, **over):
+    env = {
+        "ACCESS_LOG": str(tmp_path / "access.log"),
+        "INSTANCE_NAME": "edge",
+        "DATA_DIR": str(tmp_path / "data"),
+        "BATCH_SECONDS": "0.1",
+    }
+    env.update({k: str(v) for k, v in over.items()})
+    cfg = config.load(env)
+    # quicker loops for tests
+    return config.Config(**{**cfg.__dict__, "poll_seconds": 0.02, "rotate_grace_seconds": 0.3,
+                            "rollup_seconds": 0.0})

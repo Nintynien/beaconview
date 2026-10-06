@@ -188,6 +188,14 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
+    def handle_one_request(self):
+        # A browser closing a kept-alive connection while this thread waits for its next request raises out of
+        # socketserver, which prints the whole traceback. Nothing is lost, so close quietly.
+        try:
+            super().handle_one_request()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError):
+            self.close_connection = True
+
     def do_GET(self):
         url = urlparse(self.path)
         path = url.path

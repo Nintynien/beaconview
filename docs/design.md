@@ -371,7 +371,10 @@ pytest with recorded and generated log lines:
 - pruning: raw and rollup retention, chunked deletes
 - query layer: every filter and negation, CIDR, keyset paging, series bucketing, split-by top-N + other
 - HTTP: routes, caps, auth on/off
-- a headless browser check of both pages against a generated 7-day log
+- browser tests (`tests/ui`, Playwright + headless Chromium, its own CI job) against a real server on a generated
+  log: every page renders in both themes with no console errors and no sideways scroll at phone width; Explore
+  filters, hover marking, bar click and "Load newer", breakdown sort and filter, live rows and redraws, Pause, keeping
+  your place in the log; Overview tables and links; settings lock, save and the retention confirm
 
 ## Load test (part of milestone 1)
 

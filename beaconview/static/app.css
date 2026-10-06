@@ -241,6 +241,7 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 
 /* ---------- explore: one switchable panel over the log ---------- */
 #vizCard { margin-bottom: 16px; }
+#logsCard .head { min-height: 32px; }   /* "N new ↑" / "Back to newest" appearing must not push the log down */
 .vizhead { gap: 10px 14px; }
 .seg { display: inline-flex; border: 1px solid var(--ring); border-radius: 8px; padding: 2px; background: var(--surface-2); }
 .seg button { border: 0; background: none; height: 26px; padding: 0 12px; border-radius: 6px; cursor: pointer; color: var(--ink-2); }

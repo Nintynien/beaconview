@@ -124,6 +124,24 @@ Per-minute totals for long ranges add little (a few MB a month). Memory is typic
 `DB_MEMORY_LIMIT`. Measured on synthetic traffic: ingest keeps up with 3,000 requests/s using about a tenth of one
 CPU core, and catches up on a backlog at 40,000–55,000 lines/s.
 
+## Limitations
+
+v0.1 is deliberately small. What it does not do yet:
+
+- **One Traefik host.** It reads log files on the machine it runs on (several logs there are fine, via
+  `ACCESS_LOGS`). Collecting from Traefik on other machines is planned (an agent mode of the same image), not built.
+- **Traefik's JSON access log only.** Caddy and nginx JSON formats are planned; Traefik's text (CLF) format is not.
+- **No alerting.** It shows you what happened; it does not page you. Pair it with your monitoring for that.
+- **A handful of viewers.** Built for a team, not a public dashboard: live updates hold one connection per open
+  tab (up to 50, then pages fall back to polling), and every query runs in the one container.
+- **No user accounts.** Authentication is your proxy's job (see above); everyone who gets in sees everything.
+- **History starts when it does.** Backfill reads the rotated logs still on disk; anything older is gone. Traffic
+  from before BeaconView existed cannot be compared against.
+- **Retention is one number per kind of data.** Every request for `RETENTION_DAYS`, per-minute totals for
+  `ROLLUP_RETENTION_DAYS`; no per-host or per-path retention.
+
+Ideas being considered next are listed in [docs/design.md](docs/design.md).
+
 ## How it works
 
 One container, one process: a thread tails the log (following rotations, saving its position with every batch so a
@@ -138,8 +156,9 @@ The JSON API the pages use is yours too: `/api/summary`, `/api/series`, `/api/br
 ## Development
 
 ```sh
-python -m venv .venv && .venv/bin/pip install -r requirements.txt pytest
-.venv/bin/python -m pytest
+python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
+.venv/bin/python -m playwright install chromium             # for the browser tests in tests/ui
+.venv/bin/python -m pytest                                  # everything; tests/ui is skipped without Playwright
 python tools/genlog.py ./demo/access.log --realistic --rate 20 --history 6 --seconds 3600 &   # a day-like demo
 ACCESS_LOG=./demo/access.log DATA_DIR=./demo/data BEACONVIEW_DEV=1 .venv/bin/python -m beaconview
 python tools/smoke.py http://127.0.0.1:8080 <rows>         # what CI checks against the built image
