@@ -116,3 +116,17 @@ def test_country_map_shades_explains_and_links(site, page, errors):
     us.click()
     expect(page).to_have_url(re.compile(r"/explore\?.*country=US"))
     assert errors == []
+
+
+def test_clicking_an_overview_bar_explores_that_span(site, page, errors):
+    page.goto(site.base + "/?range=6h")
+    expect(page.locator("#seriesChart svg path").first).to_be_visible()
+    box = page.locator("#seriesChart svg").bounding_box()
+    page.mouse.click(box["x"] + box["width"] * 0.6, box["y"] + 120)
+    expect(page).to_have_url(re.compile(r"/explore\?from=\d+&to=\d+$"))
+    q = dict(p.split("=") for p in page.url.split("?")[1].split("&"))
+    span = int(q["to"]) - int(q["from"])
+    assert 0 < span <= 6 * 3_600_000 // 60, span                # one bar, not the whole range
+    expect(page.locator("#logsBody tr").first).to_be_visible()
+    expect(page.locator("#rangeBtn")).not_to_contain_text("Last")   # a fixed window, not a live preset
+    assert errors == []

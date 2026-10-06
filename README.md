@@ -16,7 +16,7 @@ unaffected.
   (a router's 5xx or latency spiking, traffic well above or below its usual level, a new or surging client or
   path); requests, unique IPs, error rates and p95 latency against the previous period; traffic by router, service
   or host; a **map of client countries**; top status codes, paths, client IPs and user agents; the latest server
-  errors. Every value links into Explore.
+  errors. Every value links into Explore, and clicking a bar on the chart opens Explore on that moment.
 - **Explore** — ask a question: filter by host, path (`/api/*`), status (`4xx`, `!304`), client IP or range, user
   agent, duration or any header Traefik keeps. See it over time (requests, bytes, response time p50/p95/p99, unique
   IPs, error rate) or broken down by any field with every measure, with the matching requests underneath. Hover a

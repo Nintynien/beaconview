@@ -5,7 +5,8 @@
    A preset range is always live, pushed: the page holds a /api/stream?kind=changes connection and re-fetches when
    the server says the data moved, at the pace of the chart's own bars (BV.cadence: every second on "Last 5
    minutes", once a minute on "Last hour"). What scans raw rows (tiles with unique IPs, top paths, IPs, user agents)
-   refreshes no more often than every 5 s. Pause freezes the window on screen as a fixed range (so does zooming);
+   refreshes no more often than every 5 s. Clicking a bar opens Explore on that bar's time span; dragging across the
+   chart zooms the Overview. Pause freezes the window on screen as a fixed range (so does zooming);
    Live returns to the preset. If streaming is not possible it polls at the same pace. Updates land in place, and
    nothing runs while the tab is hidden. */
 "use strict";
@@ -48,7 +49,7 @@
   // a link into Explore: same range, this instance, plus the given filters ([field, value] pairs) and options
   function exploreUrl(filters, extra) {
     var p = new URLSearchParams();
-    BV.rangeToUrl(state, p);
+    if (!(extra && extra.from !== undefined)) BV.rangeToUrl(state, p);   // an explicit window replaces the page's
     if (state.instance) p.append("instance", state.instance);
     (filters || []).forEach(function (f) { p.append(f[0], f[1]); });
     Object.keys(extra || {}).forEach(function (k) { p.set(k, extra[k]); });
@@ -155,10 +156,13 @@
         label: "Requests over time by status class", onZoom: function (f, t) {
           if (state.range) state.resume = state.range;
           state.range = null; state.from = f; state.to = t; writeUrl(true); reloadAll();
+        }, onClick: function (i) {         // drill down: Explore on exactly this bar's requests
+          var from = d.start + i * d.step;
+          location.href = exploreUrl([], { from: from, to: from + d.step });
         } };
       $("seriesSub").textContent = "per " + BV.span(d.step).replace(/^1 /, "") + " · " + BV.rangeLabel(state);
       BV.legend($("seriesLegend"), series, "columns");
-      if (chart) chart.update(chartOpts); else chart = BV.chart($("seriesChart"), chartOpts);
+      if (chart) chart.update(chartOpts); else { chart = BV.chart($("seriesChart"), chartOpts); $("seriesChart").classList.add("clickable"); }
       if (!$("seriesTable").hidden) BV.chartTable($("seriesTable"), chartOpts);
     }, quiet);
   }

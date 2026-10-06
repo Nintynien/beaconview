@@ -222,7 +222,8 @@ counts up every second between status checks (every 15 s), measured on the serve
   less than a day of history the card says when comparisons start. Refreshed with the slow tier.
 - **Tiles:** requests, req/s, unique IPs, 5xx rate, 4xx rate, p95, bytes sent — each with the change vs the
   previous period of the same length (rates in percentage points; red/green only where up is bad: error rates, p95).
-- **Chart:** requests over time stacked by status class (drag to zoom).
+- **Chart:** requests over time stacked by status class; click a bar to open Explore on exactly that bar's time
+  span (same instance), drag across bars to zoom the Overview.
 - **Traffic by** router / service / host, sorted busiest, most 5xx or slowest p95 (`/api/breakdown`): req/s,
   requests, 4xx %, 5xx % (each linking to those requests), p50, p95, bytes.
 - **Top lists:** status codes, paths, client IPs, user agents, hosts; **recent 5xx** (10 newest).
