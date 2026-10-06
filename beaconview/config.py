@@ -33,7 +33,7 @@ class Config:
     batch_rows: int = 50_000
     poll_seconds: float = 0.25
     rotate_grace_seconds: float = 3.0
-    rollup_seconds: float = 10.0
+    rollup_seconds: float = 5.0
     prune_every_seconds: float = 3600.0
     basic_auth_user: str = ""
     basic_auth_password: str = field(default="", repr=False)

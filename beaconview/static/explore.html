@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Explore · BeaconView</title>
+  <link rel="icon" href="/static/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="top">
+    <a class="brand" href="/">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M13 6 L23 2.5 L23 9.5 Z" fill="var(--accent)" opacity=".35"/>
+        <path d="M11 6 L1 2.5 L1 9.5 Z" fill="var(--accent)" opacity=".2"/>
+        <rect x="9.5" y="3.5" width="5" height="5" rx="1" fill="var(--accent)"/>
+        <path d="M9 9.5 H15 L16.5 21 H7.5 Z" fill="var(--ink)"/>
+        <rect x="6" y="21" width="12" height="1.5" rx=".75" fill="var(--ink)"/>
+      </svg>
+      BeaconView
+    </a>
+    <nav class="nav" aria-label="Pages">
+      <a class="soon" href="/" title="Overview arrives in the next milestone">Overview</a>
+      <a href="/explore" aria-current="page">Explore</a>
+    </nav>
+    <span class="spacer"></span>
+    <span class="ingest"><span class="dot" id="ingestDot"></span><span class="txt" id="ingestText">…</span></span>
+    <button class="btn icon" id="themeBtn" type="button"></button>
+  </header>
+
+  <main>
+    <div class="filters" role="toolbar" aria-label="Time range and filters">
+      <div class="pop">
+        <button class="btn" id="rangeBtn" type="button" aria-haspopup="true" aria-expanded="false"></button>
+        <div class="menu" id="rangeMenu" hidden></div>
+      </div>
+      <div class="pop">
+        <button class="btn" id="addBtn" type="button" aria-haspopup="true" aria-expanded="false">+ Filter</button>
+        <div class="menu" id="addMenu" hidden>
+          <form class="addf" id="addForm">
+            <div class="row">
+              <select id="addField" aria-label="Field"></select>
+              <select id="addOp" aria-label="Match">
+                <option value="is">is</option>
+                <option value="not">is not</option>
+              </select>
+            </div>
+            <input type="text" id="addHeader" placeholder="Header name, e.g. X-Request-Id" aria-label="Header name" hidden>
+            <input type="text" id="addValue" list="addValues" autocomplete="off" aria-label="Value">
+            <datalist id="addValues"></datalist>
+            <div class="hint" id="addHint"></div>
+            <div class="row"><span></span><button class="btn primary" type="submit">Add filter</button></div>
+          </form>
+        </div>
+      </div>
+      <span class="chips" id="chips"></span>
+      <span class="grow"></span>
+      <button class="btn" id="liveBtn" type="button" aria-pressed="false" title="Follow new requests as they arrive">
+        <span class="dot" id="liveDot"></span>Live
+      </button>
+      <button class="btn icon" id="refreshBtn" type="button" title="Refresh" aria-label="Refresh">↻</button>
+    </div>
+
+    <div class="banner error" id="banner" hidden></div>
+
+    <section class="tiles" id="tiles" aria-label="Summary"></section>
+
+    <div class="stack">
+      <section class="card" id="seriesCard" aria-labelledby="seriesTitle">
+        <div class="head">
+          <h2 id="seriesTitle">Requests</h2>
+          <span class="sub" id="seriesSub"></span>
+          <span class="spacer"></span>
+          <label class="sub" for="splitSel">Split by</label>
+          <select id="splitSel"></select>
+          <button class="btn" id="seriesTableBtn" type="button" aria-pressed="false">Table</button>
+        </div>
+        <div class="legend" id="seriesLegend" hidden></div>
+        <div id="seriesChart" aria-describedby="seriesHelp"></div>
+        <div class="chart-table" id="seriesTable" hidden></div>
+        <p class="sr-only" id="seriesHelp">Use the left and right arrow keys to step through time buckets. Drag across the chart to zoom into a range.</p>
+      </section>
+
+      <section class="card" id="latencyCard" aria-labelledby="latencyTitle">
+        <div class="head">
+          <h2 id="latencyTitle">Response time</h2>
+          <span class="sub" id="latencySub"></span>
+          <span class="spacer"></span>
+          <button class="btn" id="latencyTableBtn" type="button" aria-pressed="false">Table</button>
+        </div>
+        <div class="legend" id="latencyLegend" hidden></div>
+        <div id="latencyChart"></div>
+        <div class="chart-table" id="latencyTable" hidden></div>
+      </section>
+
+      <div class="split2">
+        <section class="card" id="topCard" aria-labelledby="topTitle">
+          <div class="head">
+            <h2 id="topTitle">Top</h2>
+            <select id="topSel" aria-label="Field to rank"></select>
+            <span class="spacer"></span>
+            <span class="sub" id="topSub"></span>
+          </div>
+          <div class="toplist" id="topList"></div>
+        </section>
+
+        <section class="card" id="logsCard" aria-labelledby="logsTitle">
+          <div class="head">
+            <h2 id="logsTitle">Requests</h2>
+            <span class="sub" id="logsSub"></span>
+          </div>
+          <div class="logwrap">
+            <table>
+              <thead><tr id="logsHead"></tr></thead>
+              <tbody class="rows" id="logsBody"></tbody>
+            </table>
+          </div>
+          <div class="more"><button class="btn" id="moreBtn" type="button" hidden>Load older</button></div>
+        </section>
+      </div>
+    </div>
+  </main>
+
+  <div class="scrim" id="scrim" hidden></div>
+  <aside class="drawer" id="drawer" hidden aria-labelledby="drawerTitle" role="dialog" aria-modal="true">
+    <div class="head">
+      <h2 id="drawerTitle">Request</h2>
+      <span class="spacer"></span>
+      <button class="btn icon" id="drawerClose" type="button" aria-label="Close">✕</button>
+    </div>
+    <dl id="drawerBody"></dl>
+  </aside>
+
+  <script src="/static/common.js"></script>
+  <script src="/static/chart.js"></script>
+  <script src="/static/explore.js"></script>
+</body>
+</html>

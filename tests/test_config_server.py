@@ -82,3 +82,33 @@ def test_basic_auth(site):
     right = "Basic " + base64.b64encode(b"admin:s3cret").decode()
     assert get(addr, "/api/status", {"Authorization": right})[0] == 200
     assert get(addr, "/healthz")[0] == 200            # the container probe needs no credentials
+
+
+def test_api_routes_and_errors(site):
+    addr = site()
+    for path in ("/api/fields", "/api/summary", "/api/series?buckets=30&split=status_class",
+                 "/api/top?field=ip", "/api/logs?limit=5"):
+        status, _, body = get(addr, path)
+        assert status == 200, (path, body)
+        json.loads(body)
+    status, _, body = get(addr, "/api/summary?status=teapot")
+    assert status == 400 and "status" in json.loads(body)["error"]
+    assert get(addr, "/api/series?split=nope")[0] == 400
+    assert get(addr, "/api/logs?before=garbage")[0] == 400
+    assert get(addr, "/api/series?buckets=lots")[0] == 400
+    assert get(addr, "/api/nothing")[0] == 404
+
+
+def test_pages_and_static(site):
+    addr = site()
+    status, headers, body = get(addr, "/explore")
+    assert status == 200 and b"BeaconView" in body
+    assert "script-src 'self'" in headers["Content-Security-Policy"]
+    assert get(addr, "/")[0] == 200
+    status, headers, _ = get(addr, "/static/explore.js")
+    assert status == 200 and headers["Content-Type"].startswith("text/javascript")
+    etag = headers["ETag"]
+    assert get(addr, "/static/explore.js", {"If-None-Match": etag})[0] == 304
+    assert get(addr, "/static/../server.py")[0] == 404
+    assert get(addr, "/static/%2e%2e/server.py")[0] == 404
+    assert get(addr, "/static/nope.js")[0] == 404

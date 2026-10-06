@@ -103,6 +103,11 @@ _DDL = [
     """CREATE TABLE IF NOT EXISTS ingest_state (
         instance VARCHAR PRIMARY KEY, path VARCHAR, inode UBIGINT, pos BIGINT, updated TIMESTAMP)""",
     "CREATE TABLE IF NOT EXISTS meta (key VARCHAR PRIMARY KEY, value VARCHAR)",
+    # dotted IPv4 -> integer, NULL for anything else (IPv6, junk); used by ip=a.b.c.d/n filters
+    r"""CREATE OR REPLACE MACRO ipv4_num(s) AS
+        CASE WHEN regexp_full_match(s, '\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}')
+             THEN (split_part(s, '.', 1)::UBIGINT << 24) + (split_part(s, '.', 2)::UBIGINT << 16)
+                + (split_part(s, '.', 3)::UBIGINT << 8) + split_part(s, '.', 4)::UBIGINT END""",
 ]
 
 

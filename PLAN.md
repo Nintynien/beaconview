@@ -4,7 +4,7 @@ A small, self-hosted request explorer for Traefik. It reads Traefik's JSON acces
 of every request in an embedded columnar database, and serves two pages: an overview of the whole proxy and an
 explorer for slicing requests by time, host, path, status, IP or user agent (chart on top, log lines below).
 
-Status: milestone 1 (ingest + storage) implemented and load-tested; milestones 2–4 next. Named BeaconView (2026-10-05): independent of the Traefik mark, so it also fits if other proxies
+Status: milestones 1 (ingest + storage) and 2 (Explore + query API) implemented; 3–4 next. Named BeaconView (2026-10-05): independent of the Traefik mark, so it also fits if other proxies
 (Caddy, nginx JSON logs) are supported later. The README's first line should say it reads access logs and adds no
 tracking, since "web beacon" also means a tracking pixel.
 
@@ -144,7 +144,7 @@ Columns a source cannot fill are NULL, and the pages hide a dimension that is em
   matched rows, whose cost scales with the match count; sampling did not help there (a selective filter is already
   cheaper than a sample scan).
 - **Rollups are derived, not accumulated:** each batch marks its minutes in `rollup_dirty` in the same transaction as
-  its rows; every 10 s the dirty minutes are recomputed from `requests` (delete + insert per run of minutes). A
+  its rows; every 5 s the dirty minutes are recomputed from `requests` (delete + insert per run of minutes). A
   late row (long request logged at its end) just dirties its own minute, and a crash can never leave a rollup short.
   Dirty minutes already past raw retention are skipped so a good rollup is never erased.
 - **Bulk load:** a batch is written to a temporary CSV and loaded with `read_csv`. Binding Python values
@@ -175,8 +175,16 @@ paths and user agents will compress somewhat worse.
 
 ## Pages
 
-No build step: plain HTML, CSS and JS, with [uPlot](https://github.com/leeoniya/uPlot) (MIT, ~50 KB) vendored into
-`static/vendor/`. No third-party requests at runtime. Light/dark theme.
+No build step and no frontend dependencies: plain HTML, CSS and JS, charts drawn as SVG by `static/chart.js`
+(uPlot was the plan; hand-drawn SVG gave exact control of the mark specs for ~350 lines). No third-party requests at
+runtime; a strict CSP (`script-src 'self'`, no inline styles). Light/dark theme following the OS, with a toggle.
+
+Chart rules (data-viz method): one y-axis per chart, so response time is its own chart under requests, sharing
+the time axis; stacked columns ≤ 24 px with 2 px gaps and a 4 px rounded data end; 2 px lines; legend for 2+
+series; hover tooltip listing every series; arrow keys step through buckets; a table view for every chart. Split
+colours follow the entity (a key keeps its slot while it stays visible). Status-class colours, validated for both
+modes: 2xx blue, 3xx aqua, 4xx yellow, 5xx red (light `#2a78d6 #1baf7a #eda100 #e34948`, dark
+`#3987e5 #199e70 #c98500 #d03b3b`).
 
 Look: dark-first, with one high-visibility accent (signal yellow or electric blue) for live data against muted
 chrome; logo a minimal lighthouse casting a geometric beam. Status colours stay conventional (2xx/3xx/4xx/5xx)
@@ -201,8 +209,9 @@ Counts, bytes and averages come from `minute_stats`; unique IPs and percentiles 
 - **Filter bar:** host, router, service, method, path (exact or prefix `/api/*`), status (code or class, lists),
   IP (exact or CIDR), user agent (contains), minimum duration, any kept header. Each filter can be negated
   (`status != 304`). Chips show active filters.
-- **Chart (top):** requests over time; bucket size picked for ~300 points; optional *split by* status, host, service,
-  router, IP or user agent (top 5 + other); latency p50/p95 on a second axis.
+- **Chart (top):** requests over time as stacked columns; bucket count from the chart width (~7 px per column,
+  20–240); *split by* status class (default), any field (top 5 + Other), or nothing.
+- **Response time chart:** p50/p95 lines on the same buckets (from the rollup histograms when filters allow).
 - **Summary bar:** matches, unique IPs, p50/p95, bytes.
 - **Top values panel:** pick a field, see its top values for the current filters ("which IPs hit `/api/state` in
   this hour" is one click).
@@ -216,14 +225,23 @@ All JSON, all bounded by a time range, all results capped.
 
 | Endpoint | Returns |
 |---|---|
-| `GET /api/overview?from&to` | tiles, previous-period tiles, status series, top tables |
-| `GET /api/series?<filters>&bucket&split` | time buckets × series, plus p50/p95 |
+| `GET /api/overview?from&to` | tiles, previous-period tiles, status series, top tables (milestone 3) |
+| `GET /api/summary?<filters>` | requests, req/s, 4xx/5xx, unique IPs, p50/p95, bytes |
+| `GET /api/series?<filters>&buckets&split` | time buckets × series, plus p50/p95 per bucket |
 | `GET /api/top?field&<filters>&limit` | top values with counts and share |
 | `GET /api/logs?<filters>&before=<seq>&after=<seq>&limit` | log lines |
 | `GET /api/fields` | filterable fields and their known values (hosts, routers, services) |
 | `GET /api/status` | ingest and storage health (also used by the container healthcheck) |
 
 Filters are parsed into parameterised SQL from a whitelist of fields and operators; user input never becomes SQL text.
+URL form, shared by the API and the Explore page (so any view is a link):
+`from=<ms>&to=<ms>` (the page also takes `range=15m|1h|6h|24h|7d|30d`), a field repeated to OR its values, `!` to
+exclude: `host=a.com`, `path=/api/*`, `path=*state*`, `status=4xx`, `status=!304`, `ip=203.0.113.0/24`,
+`ip=2001:db8:*`, `user_agent=bot` (contains, any case), `min_ms=500`, `h.X-Request-Id=abc` (kept headers),
+`router=(none)` (missing). Queries whose filters are all rollup dimensions (instance, host, router, service, status)
+read `minute_stats`; anything else reads raw rows. Every query runs under a 30 s limit (HTTP 504 past it).
+`/api/logs` searches from the newest end in growing windows (15 min ×4 …), so a page from a 30-day range never sorts
+30 days of rows.
 Unique counts use `approx_count_distinct` (HyperLogLog, ~2% error) and are labelled "≈"; ranges under 24 h use an
 exact count.
 
@@ -254,8 +272,8 @@ middleware or the built-in basic auth).
 
 ```
 beaconview/
-  beaconview/        __main__.py  config.py  ingest.py  store.py  query.py  server.py
-  static/              index.html  explore.html  app.css  common.js  overview.js  explore.js  vendor/uplot.*
+  beaconview/        __main__.py  config.py  parsers.py  tailer.py  ingest.py  store.py  query.py  server.py
+    static/            explore.html  app.css  common.js  chart.js  explore.js  logo.svg  (overview in milestone 3)
   tests/
   tools/               genlog.py (synthetic Traefik log writer)  bench.py (query timings)
   Dockerfile           python:3.13-slim (DuckDB wheels target glibc)
@@ -336,7 +354,8 @@ v2 adds remote Traefiks without a second codebase:
 
 1. **Ingest + storage:** tailing, rotation, exactly-once positions, schema, rollups, pruning, `/api/status`, tests,
    load test. Deployable on its own so history starts collecting.
-2. **Explore + query API:** filters, series, top values, logs paging, live mode, URL state.
+2. **Explore + query API:** filters, series, top values, logs paging, live mode, URL state. *Done 2026-10-06:
+   48 tests; checked in headless Edge at 1440 px and 390 px, both themes, no console errors or page overflow.*
 3. **Overview:** tiles, comparisons, tables, links into Explore, status strip.
 4. **Publish:** backfill, anonymisation, built-in auth, README (sizing table from the load test, screenshots,
    compose example, Traefik config to keep `User-Agent`/`Referer`/`CF-Connecting-IP`), CI, first GHCR release.

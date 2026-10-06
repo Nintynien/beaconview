@@ -1,21 +1,28 @@
-"""HTTP: the JSON API and (from milestone 2) the pages. Stdlib only, one thread per connection."""
+"""HTTP: the JSON API and the pages. Stdlib only, one thread per connection."""
 
 import base64
+import gzip
+import hashlib
 import hmac
 import json
+import mimetypes
 import logging
 import os
 import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
-from . import __version__
+from . import __version__, query
 
 log = logging.getLogger("beaconview.http")
 
 STATS_CACHE_SECONDS = 10
+STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+PAGES = {"/": "explore.html", "/explore": "explore.html"}     # "/" becomes the overview in milestone 3
+CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; "
+       "frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 
 
 class App:
@@ -30,6 +37,8 @@ class App:
         self._stats = None
         self._stats_at = 0.0
         self._stats_lock = threading.Lock()
+        self.runner = query.Runner(store)
+        self._static = {}
 
     def storage(self):
         with self._stats_lock:
@@ -48,6 +57,26 @@ class App:
             "ingest": self.ingestor.status(),
             "storage": self.storage(),
         }
+
+    def static_file(self, name):
+        """(bytes, gzipped bytes or None, content type, etag) for a file under static/, or None. Cached in memory
+        (the files are small) unless BEACONVIEW_DEV is set, so edits show without a restart."""
+        hit = None if os.environ.get("BEACONVIEW_DEV") else self._static.get(name)
+        if hit is None:
+            path = os.path.normpath(os.path.join(STATIC_DIR, name))
+            if not path.startswith(STATIC_DIR + os.sep) or not os.path.isfile(path):
+                return None
+            with open(path, "rb") as f:
+                data = f.read()
+            ctype = mimetypes.guess_type(path)[0] or "application/octet-stream"
+            if path.endswith(".js"):
+                ctype = "text/javascript"
+            if ctype.startswith("text/") or ctype == "image/svg+xml":
+                ctype += "; charset=utf-8"
+            gz = gzip.compress(data, 6) if len(data) > 1024 else None
+            hit = (data, gz, ctype, '"' + hashlib.sha1(data).hexdigest()[:16] + '"')
+            self._static[name] = hit
+        return hit
 
     def check_auth(self, header):
         if not self.cfg.basic_auth_user:
@@ -73,7 +102,8 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        path = urlparse(self.path).path
+        url = urlparse(self.path)
+        path = url.path
         try:
             if path == "/healthz":
                 # for the container's own probe: no auth, no data, just whether ingest is running
@@ -88,8 +118,12 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/status":
                 self.send_json(self.app.status())
-            elif path == "/":
-                self.send_text("BeaconView is collecting. The pages arrive in milestone 2; see /api/status.\n")
+            elif path.startswith("/api/"):
+                self.api(path, parse_qs(url.query))
+            elif path in PAGES:
+                self.send_static(PAGES[path])
+            elif path.startswith("/static/"):
+                self.send_static(path[len("/static/"):])
             else:
                 self.send_json({"error": "not found"}, 404)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
@@ -101,23 +135,99 @@ class Handler(BaseHTTPRequestHandler):
             except OSError:
                 pass
 
+    def api(self, path, params):
+        runner = self.app.runner
+        try:
+            if path == "/api/fields":
+                body = runner.fields()
+                body["instances"] = [{"instance": s.instance, "format": s.format} for s in self.app.cfg.sources]
+                body["retention"] = {"raw_days": self.app.cfg.retention_days,
+                                     "rollup_days": self.app.cfg.rollup_retention_days}
+                st = self.app.storage()
+                body["data"] = {"oldest_ms": st["oldest_ms"], "newest_ms": st["newest_ms"]}
+                self.send_json(body)
+                return
+            q = query.parse(params)
+            if path == "/api/summary":
+                self.send_json(runner.summary(q))
+            elif path == "/api/series":
+                self.send_json(runner.series(q, buckets=_int(params, "buckets", 120),
+                                             split=params.get("split", [None])[0] or None))
+            elif path == "/api/top":
+                self.send_json(runner.top(q, params.get("field", ["path"])[0], limit=_int(params, "limit", 10)))
+            elif path == "/api/logs":
+                before = params.get("before", [None])[0]
+                cursor = None
+                if before:
+                    try:
+                        ts_ms, seq = before.split(":")
+                        cursor = (int(ts_ms), int(seq))
+                    except ValueError:
+                        raise query.BadQuery("before must be <ts_ms>:<seq>") from None
+                after = params.get("after", [None])[0]
+                self.send_json(runner.logs(q, limit=_int(params, "limit", 100), before=cursor,
+                                           after_seq=int(after) if after and after.isdigit() else None))
+            else:
+                self.send_json({"error": "not found"}, 404)
+        except query.BadQuery as e:
+            self.send_json({"error": str(e)}, 400)
+        except query.QueryTimeout as e:
+            self.send_json({"error": str(e)}, 504)
+
+    def send_static(self, name):
+        hit = self.app.static_file(name)
+        if hit is None:
+            self.send_json({"error": "not found"}, 404)
+            return
+        data, gz, ctype, etag = hit
+        if self.headers.get("If-None-Match") == etag:
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        use_gz = gz is not None and "gzip" in (self.headers.get("Accept-Encoding") or "")
+        extra = {"ETag": etag, "Cache-Control": "no-cache", "Vary": "Accept-Encoding"}
+        if use_gz:
+            extra["Content-Encoding"] = "gzip"
+        if ctype.startswith("text/html"):
+            extra["Content-Security-Policy"] = CSP
+            extra["Referrer-Policy"] = "no-referrer"
+        self.send_body(200, gz if use_gz else data, ctype, extra)
+
     def send_json(self, obj, status=200):
         self.send_body(status, json.dumps(obj, separators=(",", ":")).encode(), "application/json")
 
     def send_text(self, text, status=200):
         self.send_body(status, text.encode(), "text/plain; charset=utf-8")
 
-    def send_body(self, status, body, ctype):
+    def send_body(self, status, body, ctype, extra=None):
+        if extra is None and len(body) > 1024 and "gzip" in (self.headers.get("Accept-Encoding") or ""):
+            body = gzip.compress(body, 5)
+            extra = {"Content-Encoding": "gzip", "Vary": "Accept-Encoding"}
+        headers = {"Cache-Control": "no-store"}
+        headers.update(extra or {})
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        for k, v in headers.items():
+            self.send_header(k, v)
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
 
     do_HEAD = do_GET
+
+
+def _int(params, name, default):
+    raw = params.get(name, [None])[0]
+    if raw in (None, ""):
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        raise query.BadQuery(f"{name} must be a whole number") from None
 
 
 def make_server(app, host="0.0.0.0", port=8080):

@@ -5,7 +5,7 @@ a searchable history of every request: who is hitting what, how often, and what 
 tracking to your sites and never sits in the request path: if BeaconView is slow or stopped, your traffic is
 unaffected.
 
-> **Status: early development (milestone 1 of 4).** Ingest, storage and retention work; the pages are next.
+> **Status: early development (milestone 2 of 4).** Ingest, storage, retention and the Explore page work; the overview page is next.
 > See [PLAN.md](PLAN.md).
 
 ## Running it
