@@ -133,3 +133,19 @@ def test_csv_buttons_carry_the_query(site, page, errors):
         page.click("#vizCsv")
     assert "kind=series" in dl.value.url
     assert errors == []
+
+
+def test_breakdown_by_country_shows_a_map_that_filters(site, page, errors):
+    page.goto(site.base + "/explore?range=6h&view=breakdown&group=country")
+    us = page.locator('#bdMap path[data-c="US"]')
+    expect(us).to_have_class(re.compile(r"\bq[1-5]\b"))
+    expect(page.locator("#bdTable tbody tr").first).to_be_visible()
+    us_row = page.locator("#logsBody tr", has=page.locator("td", has_text=re.compile(r"^US$"))).first
+    us_row.hover()                                                        # a request outlines its country
+    expect(page.locator('#bdMap path.marked[data-c="US"]')).to_have_count(1)
+    us.click()
+    expect(page.locator(".chip")).to_contain_text("United States")
+    expect(page).to_have_url(re.compile(r"country=US"))
+    page.select_option("#groupSel", "host")                               # no map for other groupings
+    expect(page.locator("#bdMap")).to_be_hidden()
+    assert errors == []

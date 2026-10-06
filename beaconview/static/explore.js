@@ -42,7 +42,7 @@
     view: "timeseries", measure: "requests", split: "status_class", group: "path", sort: "requests",
   };
   var slots = new BV.Slots();
-  var chart = null, chartOpts = null, bd = null;
+  var chart = null, chartOpts = null, bd = null, bdMap = null;
   // jump: the moment a bar click took the log to (null: the log starts at the newest); newer: the cursor for the
   // page just above the top row while looking at an earlier moment
   var logs = { rows: [], columns: null, next: null, maxSeq: null, total: null, jump: null, newer: null };
@@ -312,7 +312,7 @@
       var body = el("tbody");
       if (!d.rows.length) body.appendChild(el("tr", null, el("td", { colspan: 10, class: "hint", text: "No requests match." })));
       d.rows.forEach(function (r) {
-        var name = el("td", { class: "name" + (d.by === "user_agent" ? "" : " mono") },
+        var name = el("td", { class: "name" + (d.by === "user_agent" || d.by === "country" ? "" : " mono") },
           el("span", { title: r.value, text: d.by ? BV.display(d.by, r.value) : "All matching requests" }),
           d.by ? el("span", { class: "share" }, el("i", { style: "width:" + Math.max(1, Math.round(r.share * 100)) + "%" })) : null);
         var tr = el("tr", { "data-value": r.value }, name, cols.map(function (c) {
@@ -328,6 +328,22 @@
         body.appendChild(tr);
       });
       t.appendChild(body);
+      loadBdMap(d, quiet);
+    }, quiet);
+  }
+  // grouped by country: the map above the table, from every country (the table shows the top 50); a click filters
+  function loadBdMap(d, quiet) {
+    var box = $("bdMap");
+    if (d.by !== "country" || !(meta && meta.geoip && meta.geoip.active)) { box.hidden = true; bdMap = null; return; }
+    load("bdmap", null, "/api/top", apiParams({ field: "country", limit: 300 }), function (top) {
+      BV.loadWorld().then(function (w) {
+        if (state.view !== "breakdown" || state.group !== "country") return;
+        box.hidden = false;
+        bdMap = BV.countryMap(box, w, top, {
+          label: "Map of matching requests by country; the table below lists the same",
+          onPick: function (code) { addFilter("country", code, false); },
+        });
+      }, function (e) { errors.world = e.message; renderBanner(); });
     }, quiet);
   }
 
@@ -354,6 +370,7 @@
       return;
     }
     var want = r ? groupValue(r) : null;
+    if (bdMap) bdMap.mark(want);
     document.querySelectorAll("#bdTable tbody tr").forEach(function (tr) {
       tr.classList.toggle("hl", want !== null && tr.getAttribute("data-value") === want);
     });

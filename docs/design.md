@@ -228,10 +228,12 @@ counts up every second between status checks (every 15 s), measured on the serve
 - **Top lists:** status codes, paths, client IPs, user agents, hosts; **recent 5xx** (10 newest).
 - **Countries** (with GeoIP on): a world map shaded in five log-scale steps of one blue ramp (no requests = neutral
   surface), hover for the count, click into Explore; the busiest eight beside it as a table. Outlines are Natural
-  Earth 1:110m projected (Equal Earth) at build time by `tools/build_world.py` into `static/world.json` (80 KB, 26
+  Earth 1:110m projected (Miller cylindrical) at build time by `tools/build_world.py` into `static/world.json` (80 KB, 26
   KB gzipped), fetched only when the card shows. Places too small for that scale (Singapore, Hong Kong, ...) and
   unknown addresses are listed under the map. Country is not a rollup dimension (it would multiply `minute_stats`
-  by the number of countries), so the card reads raw rows and refreshes with the slow tier.
+  by the number of countries), so the card reads raw rows and refreshes with the slow tier. The map code is `static/map.js`, shared with
+  Explore, where a breakdown grouped by country shows the map (of the filtered requests) above the table: a click
+  adds the country as a filter, hovering a request outlines its country.
 - Every value links into Explore with that filter and the same range; an instance picker appears when there is
   more than one log.
 - **Live** works as on Explore: every preset is live (default range: Last hour), pushed over
@@ -363,7 +365,7 @@ middleware or the built-in basic auth).
 beaconview/
   beaconview/        __main__.py  config.py  settings.py  parsers.py  tailer.py  backfill.py  ingest.py  store.py
                      query.py  events.py  server.py
-    static/            overview.*  explore.*  settings.*  common.js  chart.js  app.css  logo.svg
+    static/            overview.*  explore.*  settings.*  common.js  chart.js  map.js  world.json  app.css  logo.svg
   tests/
   tools/               genlog.py (synthetic Traefik logs, --realistic for demos)  bench.py (query timings)
                        livetest.py (live-tail load test)  smoke.py (checks a running instance; used by CI)

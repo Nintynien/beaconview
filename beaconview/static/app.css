@@ -317,7 +317,7 @@ ul.hl .what a { font-weight: 600; overflow-wrap: anywhere; }
 :root[data-theme="dark"] { --q0: #2c2c2a; --q1: #104281; --q2: #1c5cab; --q3: #2a78d6; --q4: #5598e7; --q5: #9ec5f4; }
 .geo { display: grid; grid-template-columns: minmax(0, 2fr) minmax(240px, 1fr); gap: 16px; align-items: start; }
 @media (max-width: 760px) { .geo { grid-template-columns: minmax(0, 1fr); } }
-.geo .map { position: relative; min-width: 0; }
+.map { position: relative; min-width: 0; }
 .worldmap { display: block; width: 100%; height: auto; }
 .worldmap path { fill: var(--q0); stroke: var(--surface); stroke-width: .6; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
 .worldmap path.q1 { fill: var(--q1); } .worldmap path.q2 { fill: var(--q2); } .worldmap path.q3 { fill: var(--q3); }
@@ -325,4 +325,6 @@ ul.hl .what a { font-weight: 600; overflow-wrap: anywhere; }
 .worldmap path:not(.q0) { cursor: pointer; }
 .worldmap path.on { stroke: var(--ink); stroke-width: 1.5; }
 .legend.maplegend { margin: 8px 0 0; font-variant-numeric: tabular-nums; }
-.geo .map > .hint { margin: 6px 0 0; }
+.map > .hint { margin: 6px 0 0; }
+.bdmap { max-width: 900px; margin: 0 auto 16px; }
+.worldmap path.marked { stroke: var(--accent); stroke-width: 2; }

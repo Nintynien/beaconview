@@ -1,10 +1,12 @@
 """Build beaconview/static/world.json, the country outlines the Countries map draws, from Natural Earth's 1:110m
 admin-0 countries (public domain, naturalearthdata.com).
 
-    python tools/build_world.py ne_110m_admin_0_countries.geojson
+    python tools/build_world.py ne_110m_admin_0_countries.geojson [out.json] [miller|natural-earth|equal-earth]
 
 Countries are keyed by ISO 3166-1 alpha-2 (Natural Earth's ISO_A2_EH), the codes GeoIP gives. Shapes are projected
-here (Equal Earth) into ready SVG path data, so the page only draws. Antarctica is left out: no traffic, much area.
+here into ready SVG path data, so the page only draws. Miller is the default: the rectangle people know from web
+maps, without Mercator's polar blow-up (the equal-area ones bend the meridians, which reads as skew at this size;
+shading is by count, not area). Antarctica is left out: no traffic, much area.
 Places too small for this scale (Singapore, Hong Kong, Malta, ...) are not on the map; the table still lists them.
 """
 
@@ -30,13 +32,33 @@ def equal_earth(lon, lat):
     return x, -y
 
 
+def natural_earth(lon, lat):
+    """Šavrič et al.'s Natural Earth projection: a compromise with flat poles, close to the familiar look."""
+    lam, phi = math.radians(lon), math.radians(lat)
+    p2 = phi * phi
+    p4 = p2 * p2
+    x = lam * (0.870700 - 0.131979 * p2 + p4 * (-0.013791 + p4 * (0.003971 * p2 - 0.001529 * p4)))
+    y = phi * (1.007226 + p2 * (0.015085 + p4 * (-0.044475 + 0.028874 * p2 - 0.005916 * p4)))
+    return x, -y
+
+
+def miller(lon, lat):
+    """Miller cylindrical: a rectangle like web maps, with less polar stretch than Mercator."""
+    lam, phi = math.radians(lon), math.radians(lat)
+    return lam, -1.25 * math.log(math.tan(math.pi / 4 + 0.4 * phi))
+
+
+PROJECTIONS = {"equal-earth": equal_earth, "natural-earth": natural_earth, "miller": miller}
+
+
 def rings(geom):
     if geom["type"] == "Polygon":
         return geom["coordinates"]
     return [r for poly in geom["coordinates"] for r in poly]
 
 
-def main(src, out="beaconview/static/world.json"):
+def main(src, out="beaconview/static/world.json", projection="miller"):
+    project = PROJECTIONS[projection]
     with open(src, encoding="utf-8") as f:
         features = json.load(f)["features"]
     shapes = {}
@@ -45,7 +67,7 @@ def main(src, out="beaconview/static/world.json"):
         code = FOLD.get(p["NAME"], p["ISO_A2_EH"])
         if code in ("AQ", "-99"):
             continue
-        shapes.setdefault(code, []).extend([[equal_earth(lon, lat) for lon, lat in ring] for ring in rings(feat["geometry"])])
+        shapes.setdefault(code, []).extend([[project(lon, lat) for lon, lat in ring] for ring in rings(feat["geometry"])])
     pts = [pt for rs in shapes.values() for r in rs for pt in r]
     x0, x1 = min(x for x, _ in pts), max(x for x, _ in pts)
     y0, y1 = min(y for _, y in pts), max(y for _, y in pts)
@@ -72,7 +94,7 @@ def main(src, out="beaconview/static/world.json"):
         s = f"{v / q:.{PRECISION}f}".rstrip("0").rstrip(".")
         return s.replace("0.", ".", 1) if s.startswith(("0.", "-0.")) else s
 
-    world = {"source": "Natural Earth 1:110m admin-0 countries (public domain), Equal Earth projection",
+    world = {"source": "Natural Earth 1:110m admin-0 countries (public domain), " + projection + " projection",
              "width": WIDTH, "height": height, "countries": {c: path(rs) for c, rs in sorted(shapes.items())}}
     with open(out, "w", encoding="utf-8", newline="\n") as f:
         json.dump(world, f, separators=(",", ":"))
