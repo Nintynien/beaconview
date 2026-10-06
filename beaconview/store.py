@@ -8,6 +8,7 @@ VALUES) managed ~250 rows/s against DuckDB 1.5, while `read_csv` loads ~200,000/
 """
 
 import csv
+import json
 import os
 import threading
 import time
@@ -150,12 +151,26 @@ class Store:
     def max_seq(self):
         return self.w.execute("SELECT coalesce(max(seq), 0) FROM requests").fetchone()[0]
 
+    def save_meta(self, key, value):
+        """Save a JSON value from any thread (its own cursor: the writer cursor belongs to the ingest thread)."""
+        cur = self.reader()
+        try:
+            cur.execute("INSERT OR REPLACE INTO meta VALUES (?, ?)", [key, json.dumps(value)])
+        finally:
+            cur.close()
+
+    def get_meta(self, key):
+        """A JSON value stored with write_batch(meta=...), or None."""
+        row = self.w.execute("SELECT value FROM meta WHERE key = ?", [key]).fetchone()
+        return json.loads(row[0]) if row else None
+
     # -- writing ---------------------------------------------------------
-    def write_batch(self, rows, positions):
+    def write_batch(self, rows, positions, meta=None):
         """Insert rows (tuples in _CSV_COLUMNS order) and record each tailer's position, atomically.
 
-        positions: [(instance, path, inode, pos)]. The rows' minutes are marked dirty for rollup() in the same
-        transaction, so a crash between the two never leaves a minute uncounted.
+        positions: [(instance, path, inode, pos)]; meta: {key: JSON-able value} saved in the same transaction (the
+        backfill keeps its per-file progress there). The rows' minutes are marked dirty for rollup() in the same
+        transaction too, so a crash between the two never leaves a minute uncounted.
         """
         if rows:
             tmp = os.path.join(self.tmp_dir, "batch.csv")
@@ -178,6 +193,8 @@ class Store:
             for instance, path, inode, pos in positions:
                 self.w.execute("INSERT OR REPLACE INTO ingest_state VALUES (?, ?, ?, ?, now())",
                                [instance, path, inode, pos])
+            for key, value in (meta or {}).items():
+                self.w.execute("INSERT OR REPLACE INTO meta VALUES (?, ?)", [key, json.dumps(value)])
             self.w.execute("COMMIT")
         except Exception:
             self.w.execute("ROLLBACK")

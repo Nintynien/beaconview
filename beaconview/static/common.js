@@ -112,6 +112,7 @@ window.BV = BV;
     });
   }, 1000);
   BV.span = function (ms) {
+    if (ms < 60e3) return Math.round(ms / 1000) + " s";
     var m = ms / 60e3;
     if (m < 60) return Math.round(m) + " min";
     var h = m / 60;
@@ -147,7 +148,7 @@ window.BV = BV;
 
   /* ---------- time range ---------- */
   // A range is {range: "1h"} (relative, slides with now) or {from, to} (absolute ms).
-  BV.PRESETS = [["15m", "Last 15 minutes", 15 * 60e3], ["1h", "Last hour", 3600e3], ["6h", "Last 6 hours", 6 * 3600e3],
+  BV.PRESETS = [["5m", "Last 5 minutes", 5 * 60e3], ["15m", "Last 15 minutes", 15 * 60e3], ["1h", "Last hour", 3600e3], ["6h", "Last 6 hours", 6 * 3600e3],
     ["24h", "Last 24 hours", 86400e3], ["7d", "Last 7 days", 7 * 86400e3], ["30d", "Last 30 days", 30 * 86400e3]];
   function preset(key) { return BV.PRESETS.find(function (x) { return x[0] === key; }); }
   BV.rangeFromUrl = function (p, fallback) {
@@ -159,14 +160,35 @@ window.BV = BV;
   BV.rangeToUrl = function (r, p) {
     if (r.range) p.set("range", r.range); else { p.set("from", r.from); p.set("to", r.to); }
   };
-  // A relative range ends on the last whole 5 seconds, so every open tab asks the server the identical question
-  // and they share one cached answer (AnswerCache); the cost is data up to 5 s behind.
+  // A relative range ends on the last whole second, so tabs refreshing together ask the server the identical
+  // question and share one cached answer (AnswerCache).
   BV.rangeWindow = function (r) {
     if (r.range) {
-      var now = Math.floor(Date.now() / 5000) * 5000;
+      var now = Math.floor(Date.now() / 1000) * 1000;
       return { from: now - (preset(r.range) || preset("1h"))[2], to: now };
     }
     return { from: r.from, to: r.to };
+  };
+  // Bar size for a span drawn in `buckets` bars: the same steps the server picks (query.STEPS_S).
+  var STEPS_S = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400];
+  BV.stepFor = function (spanMs, buckets) {
+    var s = STEPS_S.find(function (x) { return x * buckets * 1000 >= spanMs; }) || STEPS_S[STEPS_S.length - 1];
+    return s * 1000;
+  };
+  // How often a preset range updates: at the pace of its own bars (a new bar per update), between 1 s and 5 min.
+  // "Last 5 minutes" (2 s bars) moves every second; "Last hour" (1 min bars) once a minute; longer ranges rarely.
+  BV.cadence = function (spanMs, buckets) {
+    return Math.max(1000, Math.min(300e3, BV.stepFor(spanMs, buckets)));
+  };
+  // The Pause / Live button: live on a preset range, paused on a fixed one.
+  BV.renderLiveButton = function (btn, dot, live) {
+    BV.clear(btn);
+    btn.appendChild(dot);
+    dot.className = "dot" + (live ? " live" : "");
+    btn.appendChild(document.createTextNode(live ? "Pause" : "Live"));
+    btn.setAttribute("aria-pressed", String(live));
+    btn.title = live ? "Updating as requests arrive. Pause to freeze this window (it becomes a fixed range you can share)."
+      : "Showing a fixed window. Live returns to a range that keeps up with new requests.";
   };
   BV.rangeLabel = function (r) {
     if (r.range) return (preset(r.range) || preset("1h"))[1];
@@ -244,6 +266,28 @@ window.BV = BV;
     }
   };
 
+  /* ---------- server-sent events ---------- */
+  // One /api/stream connection. on.rows(page) gets new matching requests (kind=logs), on.change() a "data moved"
+  // signal (kind=changes). The browser reconnects by itself (resuming via Last-Event-ID); on.fallback() is called
+  // when streaming is not possible (no EventSource, the server at its stream limit, a proxy that breaks it) and
+  // the page polls instead.
+  BV.stream = function (params, on) {
+    if (!window.EventSource) { if (on.fallback) on.fallback(); return { close: function () {} }; }
+    var es = new EventSource("/api/stream?" + params.toString()), opened = false, failures = 0, dead = false;
+    es.addEventListener("hello", function () { opened = true; failures = 0; });
+    es.addEventListener("rows", function (e) { if (on.rows) on.rows(JSON.parse(e.data)); });
+    es.addEventListener("change", function (e) { if (on.change) on.change(JSON.parse(e.data)); });
+    es.onerror = function () {
+      if (dead) return;
+      if (es.readyState === EventSource.CLOSED || (!opened && ++failures >= 3)) {
+        dead = true;
+        es.close();
+        if (on.fallback) on.fallback();
+      }
+    };
+    return { close: function () { dead = true; es.close(); } };
+  };
+
   /* ---------- ingest status: the header dot, and a banner only when something is wrong ---------- */
   var QUIET_MS = 5 * 60e3;          // no request for this long turns the dot yellow (quiet sites are allowed to be quiet)
   var BEHIND_BYTES = 50e6;          // a backlog this big gets a banner: recent numbers are incomplete until it clears
@@ -270,6 +314,15 @@ window.BV = BV;
           dot.className = "dot bad"; text.textContent = "Can't read a log";
           setBanner("error", broken.map(function (x) { return "Can't read " + x.path + ": " + x.error; }).join(" · ") +
             ". Requests in that log are not being recorded.");
+        } else if (ing.sources.some(function (x) { return x.backfill && x.backfill.state === "running"; })) {
+          var bf = ing.sources.filter(function (x) { return x.backfill && x.backfill.state === "running"; })[0];
+          var b = bf.backfill;
+          dot.className = "dot warn"; text.textContent = "Loading older logs";
+          setBanner("info", "Loading older logs" + (ing.sources.length > 1 ? " for " + bf.instance : "") +
+            (b.files_total ? ": file " + Math.min(b.files_done + 1, b.files_total) + " of " + b.files_total +
+              (b.file ? " (" + b.file + ")" : "") : "") + ", " + BV.int(b.rows) + " requests so far. " +
+            "History fills in as it goes; new requests are picked up once it finishes." +
+            (b.error ? " Retrying after: " + b.error : ""));
         } else if (unread > BEHIND_BYTES) {
           dot.className = "dot warn"; text.textContent = "Catching up";
           setBanner("info", "Catching up on " + BV.bytes(unread) + " of log. The newest numbers are incomplete until it finishes.");

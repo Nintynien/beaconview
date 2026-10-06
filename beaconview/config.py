@@ -27,13 +27,14 @@ class Config:
     rollup_retention_days: float = 90
     client_ip_header: str = ""
     anonymize_ips: bool = False
+    backfill: bool = False
     db_memory_limit: str = "512MB"
     db_threads: int = 2
     batch_seconds: float = 1.0
     batch_rows: int = 50_000
     poll_seconds: float = 0.25
     rotate_grace_seconds: float = 3.0
-    rollup_seconds: float = 5.0
+    rollup_seconds: float = 2.0       # how stale the per-minute totals (and the live Overview) may get
     prune_every_seconds: float = 3600.0
     basic_auth_user: str = ""
     basic_auth_password: str = field(default="", repr=False)
@@ -109,6 +110,7 @@ def load(env=None):
         rollup_retention_days=max(retention, _num(env, "ROLLUP_RETENTION_DAYS", 90.0, minimum=0.01)),
         client_ip_header=env.get("CLIENT_IP_HEADER", "").strip(),
         anonymize_ips=_flag(env, "ANONYMIZE_IPS"),
+        backfill=_flag(env, "BACKFILL"),
         db_memory_limit=env.get("DB_MEMORY_LIMIT", "").strip() or "512MB",
         db_threads=_num(env, "DB_THREADS", 2, int, 1),
         batch_seconds=_num(env, "BATCH_SECONDS", 1.0, minimum=0.05),

@@ -21,6 +21,7 @@ services:
       ACCESS_LOG: /var/log/traefik/access.log
       INSTANCE_NAME: edge
       RETENTION_DAYS: "7"
+      BACKFILL: "1"                  # first start: also read the rotated logs already on disk
       # CLIENT_IP_HEADER: CF-Connecting-IP
       # BASIC_AUTH_USER: admin
       # BASIC_AUTH_PASSWORD: change-me

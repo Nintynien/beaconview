@@ -2,28 +2,29 @@
    with that value as a filter and the same range, so the overview is where a question starts, Explore where it is
    answered.
 
-   Live (on by default for the preset ranges) keeps the page current in two tiers: what the per-minute rollups
-   answer (chart, traffic table, status codes, hosts, recent 5xx) refreshes often; what scans raw rows (tiles with
-   unique IPs, top paths, IPs, user agents) refreshes at a rate that falls with the range. Updates land in place, and
-   nothing refreshes while the tab is hidden. */
+   A preset range is always live, pushed: the page holds a /api/stream?kind=changes connection and re-fetches when
+   the server says the data moved, at the pace of the chart's own bars (BV.cadence: every second on "Last 5
+   minutes", once a minute on "Last hour"). What scans raw rows (tiles with unique IPs, top paths, IPs, user agents)
+   refreshes no more often than every 5 s. Pause freezes the window on screen as a fixed range (so does zooming);
+   Live returns to the preset. If streaming is not possible it polls at the same pace. Updates land in place, and
+   nothing runs while the tab is hidden. */
 "use strict";
 (function () {
   var el = BV.el, $ = BV.$;
   var meta = null;
-  var state = { range: "24h", from: null, to: null, instance: null, by: "router", sort: "requests", live: true };
-  var chart = null, chartOpts = null, timers = {};
+  var state = { range: "1h", from: null, to: null, instance: null, by: "router", sort: "requests", resume: "1h" };
+  var chart = null, chartOpts = null, timers = {}, changes = null, lastSlow = 0;
   var seenErrors = null;            // seq numbers in the recent-5xx table, to mark the rows that arrive live
   var inflight = {}, errors = {};
 
   /* ---------- URL ---------- */
   function readUrl() {
     var p = new URLSearchParams(location.search);
-    var r = BV.rangeFromUrl(p, "24h");
+    var r = BV.rangeFromUrl(p, "1h");
     state.range = r.range; state.from = r.from; state.to = r.to;
     state.instance = p.get("instance");
     state.by = p.get("by") || "router";
     state.sort = p.get("sort") || "requests";
-    state.live = !!state.range && p.get("live") !== "0";
   }
   function writeUrl(push) {
     var p = new URLSearchParams();
@@ -31,7 +32,6 @@
     if (state.instance) p.set("instance", state.instance);
     if (state.by !== "router") p.set("by", state.by);
     if (state.sort !== "requests") p.set("sort", state.sort);
-    if (state.range && !state.live) p.set("live", "0");
     var url = location.pathname + "?" + p.toString();
     if (push) history.pushState(null, "", url); else history.replaceState(null, "", url);
   }
@@ -133,16 +133,21 @@
   }
 
   /* ---------- chart ---------- */
-  function loadSeries(quiet) {
+  function isLive() { return !!state.range; }
+  function buckets() {
     var width = chart ? chart.width() : $("seriesChart").clientWidth - 60;
-    var buckets = Math.max(20, Math.min(240, Math.floor(width / 7)));
-    load("series", $("seriesCard"), "/api/series", params({ buckets: buckets, split: "status_class" }), function (d) {
+    return Math.max(20, Math.min(240, Math.floor(width / 7)));
+  }
+  function loadSeries(quiet) {
+    load("series", $("seriesCard"), "/api/series", params({ buckets: buckets(), split: "status_class" }), function (d) {
       var series = d.series.map(function (s) {
         return { key: s.key, label: s.key, color: BV.statusClassColor(s.key), values: s.values };
       });
       chartOpts = { kind: "columns", start: d.start, step: d.step, n: d.buckets, series: series, height: 220,
+        partial: isLive() && d.start + d.buckets * d.step > d.to ? d.buckets - 1 : -1,
         label: "Requests over time by status class", onZoom: function (f, t) {
-          state.range = null; state.from = f; state.to = t; state.live = false; writeUrl(true); reloadAll();
+          if (state.range) state.resume = state.range;
+          state.range = null; state.from = f; state.to = t; writeUrl(true); reloadAll();
         } };
       $("seriesSub").textContent = "per " + BV.span(d.step).replace(/^1 /, "") + " · " + BV.rangeLabel(state);
       BV.legend($("seriesLegend"), series, "columns");
@@ -241,7 +246,7 @@
     $("rangeBtn").textContent = "◷ " + BV.rangeLabel(state);
     BV.buildRangeMenu($("rangeMenu"), state, meta && meta.retention.raw_days, function (r) {
       state.range = r.range; state.from = r.from; state.to = r.to;
-      state.live = !!r.range;
+      if (r.range) state.resume = r.range;
       writeUrl(true); reloadAll();
     });
     $("byRouter").value = state.by;
@@ -250,9 +255,7 @@
     document.querySelectorAll("a.go[data-top]").forEach(function (a) {
       a.href = exploreUrl([], { top: a.getAttribute("data-top") });
     });
-    $("liveBtn").setAttribute("aria-pressed", String(state.live));
-    $("liveDot").className = "dot" + (state.live ? " live" : "");
-    $("liveBtn").title = state.range ? "Keep this page up to date" : "Live follows the latest data: switches to the last hour";
+    BV.renderLiveButton($("liveBtn"), $("liveDot"), isLive());
     seenErrors = null;
     refreshFast(false);
     refreshSlow(false);
@@ -272,18 +275,31 @@
     loadTop("ip", $("ipsTable"), $("ipsCard"), quiet);
     loadTop("user_agent", $("uasTable"), $("uasCard"), quiet);
   }
-  function intervals() {
-    var w = win(), span = w.to - w.from;
-    if (span <= 3600e3) return { fast: 10e3, slow: 10e3 };
-    if (span <= 86400e3) return { fast: 15e3, slow: 30e3 };
-    return { fast: 30e3, slow: 60e3 };
+  function intervals() {        // fastest refresh per tier, in ms: one bar's worth; raw scans no faster than 5 s
+    var w = win(), fast = BV.cadence(w.to - w.from, buckets());
+    return { fast: fast, slow: Math.max(5e3, fast) };
+  }
+  function onChange() {
+    refreshFast(true);
+    if (Date.now() - lastSlow >= intervals().slow) { lastSlow = Date.now(); refreshSlow(true); }
   }
   function schedule() {
     clearInterval(timers.fast); clearInterval(timers.slow);
-    if (!state.live || !state.range) return;
+    if (changes) { changes.close(); changes = null; }
+    if (!isLive() || document.hidden) return;
     var iv = intervals();
-    timers.fast = setInterval(function () { if (!document.hidden) refreshFast(true); }, iv.fast);
-    timers.slow = setInterval(function () { if (!document.hidden) refreshSlow(true); }, iv.slow);
+    lastSlow = Date.now();
+    var p = new URLSearchParams();
+    p.set("kind", "changes");
+    p.set("min_interval", iv.fast / 1000);
+    changes = BV.stream(p, {
+      change: onChange,
+      fallback: function () {        // no streaming: poll at the same rates (fast tier no quicker than 10 s)
+        changes = null;
+        timers.fast = setInterval(function () { if (!document.hidden) refreshFast(true); }, Math.max(10e3, iv.fast));
+        timers.slow = setInterval(function () { if (!document.hidden) refreshSlow(true); }, iv.slow);
+      },
+    });
   }
 
   function init() {
@@ -306,15 +322,21 @@
     }).catch(function (e) { errors.fields = e.message; banner(); reloadAll(); });
     $("byRouter").addEventListener("change", function () { state.by = this.value; writeUrl(false); loadBreakdown(); });
     $("bySort").addEventListener("change", function () { state.sort = this.value; writeUrl(false); loadBreakdown(); });
-    $("refreshBtn").addEventListener("click", reloadAll);
     $("liveBtn").addEventListener("click", function () {
-      state.live = !state.live;
-      if (state.live && !state.range) { state.range = "1h"; state.from = state.to = null; }
-      writeUrl(false);
+      if (isLive()) {
+        // Pause: keep exactly this window as a fixed range; the next load draws it without the "so far" bar
+        var w = win();
+        state.resume = state.range;
+        state.range = null; state.from = w.from; state.to = w.to;
+      } else {
+        state.range = state.resume || "1h"; state.from = state.to = null;
+      }
+      writeUrl(true);
       reloadAll();
     });
     document.addEventListener("visibilitychange", function () {
-      if (!document.hidden && state.live && state.range) { refreshFast(true); refreshSlow(true); }
+      if (document.hidden) { if (changes) { changes.close(); changes = null; } return; }
+      if (isLive()) { refreshFast(true); refreshSlow(true); schedule(); }
     });
     $("seriesTableBtn").addEventListener("click", function () {
       var on = this.getAttribute("aria-pressed") !== "true";

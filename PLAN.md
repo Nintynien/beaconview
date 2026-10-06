@@ -74,8 +74,14 @@ Python 3.13 with one dependency (`duckdb`). Stdlib `json` parses tens of thousan
   - *copytruncate*: the file is smaller than our offset — restart at 0.
 - **Exactly once:** `ingest_state(instance, path, inode, offset, last_ts)` is updated in the same transaction as the batch's
   rows, so a crash or restart neither drops nor duplicates a line.
-- **Backfill (`BACKFILL=1`, first run only):** read `access.log.N` and `access.log.N.gz` oldest first, skipping rows
-  older than the retention window, before starting the live tail.
+- **Backfill (`BACKFILL=1`, first run only):** before a log's live tail starts, read its rotated siblings
+  (`access.log.1`, `access.log.2.gz`, date-stamped names; gzip recognised by content) oldest first by mtime,
+  skipping files last written before the retention window and rows older than it. "First run" means the log has no
+  saved position (turning BACKFILL on for a log already being tailed does nothing) or its backfill was interrupted.
+  Progress is saved per file in the same transaction as its rows, so a stop or crash resumes mid-file without
+  duplicates; a file is identified by a hash of its first 64 KB, which survives logrotate renaming and compressing
+  it. Files rotated while the backfill runs are picked up before the live tail starts. Measured: 900,000 lines from
+  `.3.gz`, `.2.gz`, `.1` in ~16 s (~56,000 lines/s). A banner shows progress ("file 2 of 3").
 - **Ordering:** Traefik writes a line when the request *finishes*, keyed by when it *started*, so a long request
   (e.g. a websocket open for hours) arrives late with an old timestamp. Rows are stored by start time; rollups are
   updated incrementally (below), so late rows still count.
@@ -213,10 +219,10 @@ counts up every second between status checks (every 15 s), measured on the serve
 - **Top lists:** status codes, paths, client IPs, user agents, hosts; **recent 5xx** (10 newest).
 - Every value links into Explore with that filter and the same range; an instance picker appears when there is
   more than one log.
-- **Live** (default on for preset ranges, off for custom/zoomed ones): two tiers, sized to the range. What the
-  rollups answer (chart, traffic table, status codes, hosts, recent 5xx) every 10 s up to 1 h, 15 s up to 24 h,
-  30 s beyond; what scans raw rows (tiles with unique IPs, top paths/IPs/user agents) every 10 s / 30 s / 60 s.
-  Updates land in place without dimming, new 5xx rows are highlighted, nothing runs while the tab is hidden.
+- **Live** works as on Explore: every preset is live (default range: Last hour), pushed over
+  `/api/stream?kind=changes`, at the pace of the chart's bars; what scans raw rows (tiles with unique IPs, top
+  paths/IPs/user agents) no more often than every 5 s. Pause / Live as on Explore. Updates land in place, new 5xx
+  rows are highlighted, nothing runs while the tab is hidden.
 
 Counts, bytes and percentiles come from `minute_stats` (histograms); unique IPs and raw-field tops from `requests`.
 
@@ -237,12 +243,44 @@ Redesigned 2026-10-06: one switchable panel on top, the matching requests below 
 - **Linked:** hovering a request marks its bucket in the Timeseries (accent band or crosshair) or its group in the
   Breakdown; clicking a bar (or Enter on a focused bucket) jumps the log to that moment ("from 14:05 back", with
   "Back to newest"). From there "Load older" pages down and "Load newer" pages up, keeping the rows being read in
-  place; reaching the newest request returns the log to its normal newest-first mode (and Follow resumes).
+  place; reaching the newest request returns the log to its normal newest-first mode (and Live resumes).
 - **Requests (bottom):** newest first with a total match count, keyset-paged ("Load older"). Click a row for every
   field with filter buttons.
-- **Follow:** polls `/api/logs?after=<seq>` every 5 s and prepends new matching lines, a filtered `tail -f`. The
-  panel holds still; ↻ re-asks. (`follow=1` in the URL; `live=1` from older links still works.)
+- **Live = a preset range.** "Last 5 minutes" … "Last 30 days" are always live; there is no Live toggle. They update
+  at the pace of their own bars (`BV.cadence`: one bar's worth, 1 s to 5 min): "Last 5 minutes" (2 s bars) scrolls
+  with a new bar every 2 s, "Last hour" (1 min bars) once a minute, longer ranges rarely. The log streams new
+  matching requests on every preset (one `/api/stream?kind=logs&changes=1` connection); if you have scrolled down
+  to read, your place is kept and an "N new ↑" pill says what arrived above. The newest, still-filling bar is drawn
+  lighter and labelled "so far", so it does not read as a drop. **Pause** freezes the window on screen as a fixed
+  from/to range (shareable, nothing moves); zooming does the same; **Live** returns to the preset. While the log
+  shows an earlier moment (a clicked bar) the chart keeps moving and new rows wait. Falls back to polling if
+  streaming fails. History (2026-10-06): a log-only "Follow", then a Live toggle beside the range, before settling
+  on this at the owner's suggestion.
 - URL keeps the view: `view=breakdown`, `measure=`, `split=`, `group=`, `sort=` (old `top=` links map to `group=`).
+
+### Settings (`/settings`)
+
+- **Status:** per log (file being read, state, newest request, lines read, unreadable lines and the last one,
+  rotations, backfill progress), database (size, rows, oldest, per-minute totals, last cleanup), process (version,
+  uptime, memory, CPU, open live connections). Reached from the nav and by clicking the header's status dot.
+- **Editable while running:** request retention, per-minute-total retention, client IP header, IP anonymization
+  (`settings.py`). An environment variable, when set, wins and the field is locked ("set by RETENTION_DAYS"); other
+  values are saved in `meta` and survive restarts. Lowering a retention first shows what it would delete
+  (`/api/settings/preview`) and asks; the prune runs within seconds of saving.
+- **Read-only, restart needed:** log paths, backfill, data directory, database limits, port, built-in auth.
+- No auth safeguards in the app beyond optional basic auth: the README tells people to put it behind their proxy's
+  authentication (owner's call, 2026-10-06).
+
+## Realtime
+
+Server-Sent Events, not WebSockets or polling: updates only flow server → browser, SSE is plain HTTP through any
+proxy, `EventSource` reconnects by itself and resumes with `Last-Event-ID` (the log seq), and it is stdlib on the
+server. In-process pub/sub (`events.py`): the ingest thread publishes after each committed batch and each rollup
+that changed something; each open stream waits, then queries what is new for it (a slow stream never builds a
+backlog). Streams send a heartbeat every 15 s, end after 10 min (the browser reconnects), notice a closed tab within
+5 s, and are capped at 50 (then 503 and the page polls). One thread per stream is fine for an internal tool with a
+handful of viewers. Per-minute totals rebuild every 2 s; relative ranges end on a whole second; the answer cache
+holds 2 s.
 
 ## API
 
@@ -256,7 +294,11 @@ All JSON, all bounded by a time range, all results capped.
 | `GET /api/top?field&<filters>&limit` | top values with counts and share |
 | `GET /api/logs?<filters>&before=<ts:seq>&since=<ts:seq>&after=<seq>&limit` | log lines, newest first: older than `before`, the page just newer than `since`, or ingested after `after`; the first page carries the total match count |
 | `GET /api/fields` | filterable fields and their known values (hosts, routers, services) |
-| `GET /api/status` | ingest and storage health (also used by the container healthcheck) |
+| `GET /api/status` | ingest and storage health |
+| `GET /api/stream?kind=logs&<filters>` | SSE: new matching requests as they are written (`rows` events, id = seq) |
+| `GET /api/stream?kind=changes&min_interval=s` | SSE: a `change` event when the data moved, throttled |
+| `GET /api/settings`, `POST /api/settings` | editable settings (with lock state) and the restart-only ones; save as JSON |
+| `GET /api/settings/preview?retention_days&rollup_retention_days` | what those retentions would delete now |
 
 **Answer cache:** identical API requests within 5 s share one answer, and concurrent identical requests run the query
 once (`AnswerCache`, single flight; follow requests are never cached). Pages end relative ranges on a 5 s boundary
@@ -390,7 +432,7 @@ v2 adds remote Traefiks without a second codebase:
 3. **Overview:** tiles, comparisons, tables, links into Explore, status strip. *Done 2026-10-06: built from the
    existing endpoints plus `/api/breakdown` (no separate `/api/overview`), 49 tests, checked in headless Edge at
    1440 px and 390 px in both themes; the range picker moved into common.js and is shared by both pages.*
-4. **Publish:** backfill, anonymisation, built-in auth, README (sizing table from the load test, screenshots,
+4. **Publish:** backfill (*done 2026-10-06*), anonymisation, built-in auth, README (sizing table from the load test, screenshots,
    compose example, Traefik config to keep `User-Agent`/`Referer`/`CF-Connecting-IP`), CI, first GHCR release.
 
 ### Our own deployment (infra-ops)

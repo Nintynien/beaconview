@@ -6,6 +6,8 @@ import hashlib
 import hmac
 import json
 import mimetypes
+import select
+import socket
 import logging
 import os
 import sys
@@ -16,13 +18,18 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from . import __version__, query
+from .settings import SettingsError
 
 log = logging.getLogger("beaconview.http")
 
 STATS_CACHE_SECONDS = 10
-ANSWER_CACHE_SECONDS = 5      # identical queries within this window share one answer (see AnswerCache)
+ANSWER_CACHE_SECONDS = 2      # identical queries within this window share one answer (see AnswerCache)
+STREAM_LIFETIME = 600         # a stream ends after this long; the browser reconnects (and resumes) on its own
+STREAM_HEARTBEAT = 15         # a comment line this often keeps proxies from closing a quiet stream
+STREAM_CHECK = 5              # how often an idle stream checks whether the browser is still there
+MAX_STREAMS = 50              # beyond this, /api/stream answers 503 and pages fall back to polling
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
-PAGES = {"/": "overview.html", "/explore": "explore.html"}
+PAGES = {"/": "overview.html", "/explore": "explore.html", "/settings": "settings.html"}
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; "
        "frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 
@@ -81,6 +88,10 @@ class App:
         self.cfg = cfg
         self.store = store
         self.ingestor = ingestor
+        self.settings = ingestor.settings
+        self.hub = ingestor.hub
+        self.streams = 0
+        self._streams_lock = threading.Lock()
         self.started = time.time()
         self._stats = None
         self._stats_at = 0.0
@@ -102,7 +113,8 @@ class App:
             "now_ms": int(time.time() * 1000),
             "uptime_s": int(time.time() - self.started),
             "process": {"cpu_s": round(time.process_time(), 2), "rss_bytes": rss_bytes()},
-            "retention": {"raw_days": self.cfg.retention_days, "rollup_days": self.cfg.rollup_retention_days},
+            "retention": {"raw_days": self.settings.retention_days, "rollup_days": self.settings.rollup_retention_days},
+            "streams": self.streams,
             "ingest": self.ingestor.status(),
             "storage": self.storage(),
         }
@@ -126,6 +138,32 @@ class App:
             hit = (data, gz, ctype, '"' + hashlib.sha1(data).hexdigest()[:16] + '"')
             self._static[name] = hit
         return hit
+
+    def acquire_stream(self):
+        with self._streams_lock:
+            if self.streams >= MAX_STREAMS:
+                return False
+            self.streams += 1
+            return True
+
+    def release_stream(self):
+        with self._streams_lock:
+            self.streams -= 1
+
+    def restart_only(self):
+        """The settings that need a restart, for the settings page (read-only there)."""
+        c = self.cfg
+        return [
+            {"label": "Logs", "env": "ACCESS_LOG / ACCESS_LOGS",
+             "value": ", ".join(f"{s.instance}: {s.path} ({s.format})" for s in c.sources)},
+            {"label": "Read rotated logs on first start", "env": "BACKFILL", "value": "on" if c.backfill else "off"},
+            {"label": "Data directory", "env": "DATA_DIR", "value": c.data_dir},
+            {"label": "Database memory limit", "env": "DB_MEMORY_LIMIT", "value": c.db_memory_limit},
+            {"label": "Database threads", "env": "DB_THREADS", "value": str(c.db_threads)},
+            {"label": "Port", "env": "PORT", "value": str(c.port)},
+            {"label": "Built-in authentication", "env": "BASIC_AUTH_USER / BASIC_AUTH_PASSWORD",
+             "value": "on" if c.basic_auth_user else "off (use your proxy's authentication)"},
+        ]
 
     def check_auth(self, header):
         if not self.cfg.basic_auth_user:
@@ -167,6 +205,12 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/status":
                 self.send_json(self.app.status())
+            elif path == "/api/stream":
+                self.stream(parse_qs(url.query))
+            elif path == "/api/settings":
+                self.send_json(self.settings_body())
+            elif path == "/api/settings/preview":
+                self.send_json(self.settings_preview(parse_qs(url.query)))
             elif path.startswith("/api/"):
                 self.api(path, parse_qs(url.query))
             elif path in PAGES:
@@ -184,14 +228,161 @@ class Handler(BaseHTTPRequestHandler):
             except OSError:
                 pass
 
+    do_HEAD = do_GET
+
+    def do_POST(self):
+        path = urlparse(self.path).path
+        try:
+            if not self.app.check_auth(self.headers.get("Authorization")):
+                self.send_response(401)
+                self.send_header("WWW-Authenticate", 'Basic realm="BeaconView", charset="UTF-8"')
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            if path != "/api/settings":
+                self.send_json({"error": "not found"}, 404)
+                return
+            length = int(self.headers.get("Content-Length") or 0)
+            if not 0 < length <= 16384:
+                self.send_json({"error": "expected a small JSON body"}, 400)
+                return
+            try:
+                changes = json.loads(self.rfile.read(length))
+                if not isinstance(changes, dict):
+                    raise ValueError
+            except ValueError:
+                self.send_json({"error": "the body must be a JSON object of settings"}, 400)
+                return
+            try:
+                changed = self.app.settings.update(changes)
+            except SettingsError as e:
+                self.send_json({"error": str(e)}, 400)
+                return
+            body = self.settings_body()
+            body["changed"] = sorted(changed)
+            self.send_json(body)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass
+        except Exception:
+            log.exception("error handling POST %s", self.path)
+            self.send_json({"error": "internal error"}, 500)
+
+    def settings_body(self):
+        return {"editable": self.app.settings.describe(), "restart_only": self.app.restart_only()}
+
+    def settings_preview(self, params):
+        """What saving these retentions would delete now, so the page can say so before it happens."""
+        def days(name):
+            raw = params.get(name, [None])[0]
+            try:
+                return float(raw) if raw not in (None, "") else getattr(self.app.settings, name)
+            except ValueError:
+                return getattr(self.app.settings, name)
+        now = int(time.time() * 1000)
+        raw_cut = now - int(days("retention_days") * 86_400_000)
+        roll_cut = now - int(max(days("rollup_retention_days"), days("retention_days")) * 86_400_000)
+        run = self.app.runner.run
+        requests = run("SELECT count(*) FROM requests WHERE ts < epoch_ms(?::BIGINT)", [raw_cut])[0][0]
+        rollups = run("SELECT count(*) FROM minute_stats WHERE minute < epoch_ms(?::BIGINT)", [roll_cut])[0][0]
+        return {"requests_deleted": requests, "rollup_rows_deleted": rollups, "requests_cutoff_ms": raw_cut,
+                "rollups_cutoff_ms": roll_cut}
+
+    def stream(self, params):
+        """Server-Sent Events. kind=logs: new requests matching the filters, as they are written (event "rows",
+        id = the newest seq sent, so a reconnect resumes with Last-Event-ID). kind=changes: a "change" event when
+        the data moved, at most every min_interval seconds; the page then re-fetches what it shows. A logs stream
+        with changes=1 carries both, so a live Explore tab needs one connection."""
+        kind = params.get("kind", ["logs"])[0]
+        want_changes = kind == "changes" or params.get("changes", [""])[0] == "1"
+        if kind not in ("logs", "changes"):
+            self.send_json({"error": "kind must be logs or changes"}, 400)
+            return
+        try:
+            q = query.parse(params)
+            min_interval = min(300.0, max(0.5, float(params.get("min_interval", ["1"])[0])))
+        except (query.BadQuery, ValueError) as e:
+            self.send_json({"error": str(e)}, 400)
+            return
+        last = self.headers.get("Last-Event-ID") or params.get("after", [""])[0]
+        after = int(last) if last.isdigit() else None
+        if not self.app.acquire_stream():
+            self.send_json({"error": "too many open streams; polling instead"}, 503)
+            return
+        hub = self.app.hub
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Accel-Buffering", "no")       # nginx-style proxies: do not buffer
+            self.send_header("Connection", "close")           # no Content-Length: the stream ends when we close
+            self.end_headers()
+            self.close_connection = True
+            version, max_seq, _ = hub.snapshot()
+            if after is None:
+                after = max_seq                                # start from now
+            self._sse("retry: 3000\n\n")
+            self._sse(f"event: hello\ndata: {json.dumps({'max_seq': max_seq})}\n\n")
+            deadline = time.monotonic() + STREAM_LIFETIME
+            wrote = last_change = time.monotonic()
+            pending = False
+            if kind == "logs" and after < max_seq:
+                version = -1                                   # resuming: send what was missed right away
+            while time.monotonic() < deadline and not hub.closed:
+                if self._client_gone():
+                    break
+                wait = STREAM_CHECK
+                if pending:
+                    wait = max(0.05, min_interval - (time.monotonic() - last_change))
+                new_version, max_seq, rollup_version = hub.wait(version, wait)
+                if hub.closed:
+                    break
+                moved = new_version != version
+                version = new_version
+                if kind == "logs" and moved and max_seq > after:
+                    now = int(time.time() * 1000)
+                    live = query.Query(q.from_ms, now + 60_000, q.conds, q.min_us, q.max_us, q.headers)
+                    page = self.app.runner.logs(live, limit=500, after_seq=after)
+                    if page["rows"]:
+                        top = max(r[0] for r in page["rows"])
+                        self._sse(f"event: rows\nid: {top}\ndata: {json.dumps(page, separators=(',', ':'))}\n\n")
+                        wrote = time.monotonic()
+                    # rows up to max_seq that did not match never will: skip past them for good
+                    after = max(after, max_seq, max((r[0] for r in page["rows"]), default=0))
+                if want_changes and moved and version > 0:
+                    pending = True
+                if pending and time.monotonic() - last_change >= min_interval:
+                    self._sse(f"event: change\ndata: {json.dumps({'max_seq': max_seq, 'rollup': rollup_version})}\n\n")
+                    last_change = wrote = time.monotonic()
+                    pending = False
+                if time.monotonic() - wrote >= STREAM_HEARTBEAT:
+                    self._sse(": ping\n\n")
+                    wrote = time.monotonic()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+            pass                                               # the tab went away
+        finally:
+            self.app.release_stream()
+
+    def _client_gone(self):
+        """True once the browser has closed the connection (it never sends anything on a stream, so a readable
+        socket means end of file)."""
+        try:
+            readable, _, _ = select.select([self.connection], [], [], 0)
+            return bool(readable) and self.connection.recv(1, socket.MSG_PEEK) == b""
+        except (OSError, ValueError):
+            return True
+
+    def _sse(self, text):
+        self.wfile.write(text.encode("utf-8"))
+        self.wfile.flush()
+
     def api(self, path, params):
         runner = self.app.runner
         try:
             if path == "/api/fields":
                 body = runner.fields()
                 body["instances"] = [{"instance": s.instance, "format": s.format} for s in self.app.cfg.sources]
-                body["retention"] = {"raw_days": self.app.cfg.retention_days,
-                                     "rollup_days": self.app.cfg.rollup_retention_days}
+                body["retention"] = {"raw_days": self.app.settings.retention_days,
+                                     "rollup_days": self.app.settings.rollup_retention_days}
                 st = self.app.storage()
                 body["data"] = {"oldest_ms": st["oldest_ms"], "newest_ms": st["newest_ms"]}
                 self.send_json(body)
@@ -272,8 +463,6 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
-
-    do_HEAD = do_GET
 
 
 def _cursor(params, name):

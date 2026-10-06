@@ -6,12 +6,15 @@
    totals). The two halves are linked: hovering a request marks its bucket in the chart, or its group in the
    breakdown; clicking a bar jumps the log to that moment; a breakdown row filters to or excludes its value.
 
-   Explore answers a question and holds still; ↻ re-asks it. The one moving part is Follow: new matching requests
-   join the top of the log as they arrive (a filtered tail -f). The live dashboard is the Overview. */
+   A preset range ("Last hour") is always live, over one /api/stream connection: new matching requests are pushed
+   into the top of the log about a second after Traefik logs them (keeping your place if you have scrolled down), and
+   the chart or breakdown redraws at the pace of its own bars (BV.cadence: every second on "Last 5 minutes", once a
+   minute on "Last hour"). Pause freezes the window on screen as a fixed range; zooming does the same; Live returns
+   to the preset. A fixed range holds still; reloading the page re-asks it. */
 "use strict";
 (function () {
   var el = BV.el, $ = BV.$;
-  var FOLLOW_MS = 5000;
+  var POLL_MS = 5000;              // only when streaming is not possible
   var NEWEST = 9e15;               // a seq larger than any: "everything at or before this time"
   var MEASURES = [["requests", "Requests"], ["bytes", "Bytes sent"], ["latency", "Response time"],
     ["unique_ips", "Unique IPs"], ["error_rate", "Error rate"]];
@@ -35,7 +38,7 @@
 
   var meta = null;                 // /api/fields
   var state = {
-    range: "1h", from: null, to: null, filters: [], live: false,
+    range: "1h", from: null, to: null, filters: [], resume: "1h",   // resume: the preset Live returns to
     view: "timeseries", measure: "requests", split: "status_class", group: "path", sort: "requests",
   };
   var slots = new BV.Slots();
@@ -44,6 +47,7 @@
   // page just above the top row while looking at an earlier moment
   var logs = { rows: [], columns: null, next: null, maxSeq: null, total: null, jump: null, newer: null };
   var inflight = {}, errors = {}, timers = {};
+  var follow = null;               // the open stream while live
 
   /* ---------- URL state ---------- */
   function isFilterKey(k) {
@@ -59,7 +63,6 @@
     state.split = p.has("split") ? p.get("split") : "status_class";
     state.group = p.has("group") ? p.get("group") : p.get("top") || "path";      // top=: links from before the redesign
     state.sort = p.get("sort") || "requests";
-    state.live = (p.get("follow") === "1" || p.get("live") === "1") && !!state.range;
     state.filters = [];
     p.forEach(function (v, k) { if (isFilterKey(k)) state.filters.push([k, v]); });
   }
@@ -72,7 +75,6 @@
     if (state.split !== "status_class") p.set("split", state.split);
     if (state.group !== "path") p.set("group", state.group);
     if (state.sort !== "requests") p.set("sort", state.sort);
-    if (state.live) p.set("follow", "1");
     var url = location.pathname + "?" + p.toString();
     if (push) history.pushState(null, "", url); else history.replaceState(null, "", url);
   }
@@ -109,7 +111,7 @@
   function buildRangeMenu() {
     BV.buildRangeMenu($("rangeMenu"), state, meta && meta.retention.raw_days, function (r) {
       state.range = r.range; state.from = r.from; state.to = r.to;
-      if (!r.range) state.live = false;
+      if (r.range) state.resume = r.range;
       writeUrl(true); reloadAll();
     });
   }
@@ -180,11 +182,14 @@
   }
 
   /* ---------- fetching ---------- */
-  function load(name, card, path, params, onData) {
-    if (inflight[name]) inflight[name].abort();
+  function load(name, card, path, params, onData, quiet) {
+    if (inflight[name]) {
+      if (quiet) return;            // a live redraw never interrupts a load already on its way
+      inflight[name].abort();
+    }
     var ctl = new AbortController();
     inflight[name] = ctl;
-    if (card) card.classList.add("loading");
+    if (card && !quiet) card.classList.add("loading");
     return BV.api(path, params, ctl.signal).then(function (d) {
       if (inflight[name] !== ctl) return;
       inflight[name] = null;
@@ -219,9 +224,9 @@
     $("splitSel").value = state.split;
     $("groupSel").value = state.group;
   }
-  function loadViz() {
-    renderControls();
-    if (state.view === "timeseries") loadSeries(); else loadBreakdown();
+  function loadViz(quiet) {
+    if (!quiet) renderControls();
+    if (state.view === "timeseries") loadSeries(quiet); else loadBreakdown(quiet);
   }
   function buckets() {
     // the chart area's width right now (the panel may just have been shown), less the y-axis labels
@@ -229,7 +234,7 @@
     if (w <= 0) w = $("vizCard").clientWidth - 92;
     return Math.max(20, Math.min(240, Math.floor(w / 7)));
   }
-  function loadSeries() {
+  function loadSeries(quiet) {
     var split = SPLITTABLE[state.measure] ? state.split || null : null;
     load("viz", $("vizCard"), "/api/series", apiParams({ buckets: buckets(), split: split, measure: state.measure }),
       function (d) {
@@ -247,7 +252,8 @@
           return { key: s.key, label: label, color: color, values: s.values };
         });
         var f = formats(d.unit);
-        chartOpts = { kind: d.kind, start: d.start, step: d.step, n: d.buckets, series: series, height: 260,
+        var partial = isLive() && d.start + d.buckets * d.step > d.to ? d.buckets - 1 : -1;
+        chartOpts = { kind: d.kind, start: d.start, step: d.step, n: d.buckets, series: series, height: 260, partial: partial,
           yFormat: f.axis, tipFormat: f.tip, label: "Matching requests over time", onZoom: zoom, onClick: jumpTo,
           emptyText: d.measure === "latency" ? "No timed requests in this range" : "No requests in this range" };
         $("vizSub").textContent = "per " + BV.span(d.step).replace(/^1 /, "") + " · " + BV.rangeLabel(state) +
@@ -256,7 +262,7 @@
         if (chart) chart.update(chartOpts); else { chart = BV.chart($("tsChart"), chartOpts); $("tsChart").classList.add("clickable"); }
         if (!$("tsTable").hidden) BV.chartTable($("tsTable"), chartOpts);
         if (logs.jump) chart.mark(bucketOf(logs.jump - 1));
-      });
+      }, quiet);
   }
   function bucketOf(ms) {
     if (!chartOpts) return -1;
@@ -265,7 +271,8 @@
   }
   function zoom(from, to) {
     if (to - from < 2000) return;
-    state.range = null; state.from = from; state.to = to; state.live = false;
+    if (state.range) state.resume = state.range;
+    state.range = null; state.from = from; state.to = to;
     writeUrl(true);
     reloadAll();
   }
@@ -277,7 +284,7 @@
     loadLogs();
   }
 
-  function loadBreakdown() {
+  function loadBreakdown(quiet) {
     var by = state.group || "none";
     load("viz", $("vizCard"), "/api/breakdown", apiParams({ by: by, sort: state.sort, limit: 50, unique: 1 }), function (d) {
       bd = d;
@@ -318,7 +325,7 @@
         body.appendChild(tr);
       });
       t.appendChild(body);
-    });
+    }, quiet);
   }
 
   /* ---------- the log ---------- */
@@ -386,7 +393,7 @@
     var parts = [];
     if (logs.total !== null && logs.total !== undefined) parts.push(BV.int(logs.total) + " matching");
     parts.push(logs.jump ? "from " + BV.stamp(logs.jump, logsSpanDays()).replace(/\.\d+$/, "") + " back" : "newest first");
-    if (state.live && !logs.jump) parts.push("following");
+    if (isLive() && !logs.jump) parts.push("live");
     $("logsSub").textContent = parts.join(" · ");
   }
   function loadLogs() {
@@ -399,6 +406,7 @@
       logs.newer = d.rows.length ? [d.rows[0][logs.columns.indexOf("ts")], d.rows[0][0]] : [logs.jump, NEWEST];
       renderLogs();
       if (logs.jump) $("logsCard").scrollIntoView({ block: "nearest", behavior: "smooth" });
+      startLive();
     });
   }
   function loadNewer() {
@@ -411,10 +419,11 @@
       logs.rows = d.rows.concat(logs.rows);
       if (d.rows.length) logs.newer = [d.rows[0][logs.columns.indexOf("ts")], d.rows[0][0]];
       if (!d.newer) {
-        // caught up with the newest matching request: back to the normal log (Follow resumes from here)
+        // caught up with the newest matching request: back to the normal log (Live resumes from here)
         logs.jump = null;
         logs.maxSeq = logs.rows.reduce(function (m, r) { return Math.max(m, r[0]); }, logs.maxSeq || 0);
         if (chart) chart.mark(-1);
+        startLive();
       }
       // hiding the button bar would pull the log up by its height: scroll the page by the same amount
       var top0 = wrap.getBoundingClientRect().top;
@@ -424,7 +433,7 @@
       var parts = [];
       if (logs.total !== null && logs.total !== undefined) parts.push(BV.int(logs.total) + " matching");
       parts.push(logs.jump ? "from " + BV.stamp(logs.rows[0][logs.columns.indexOf("ts")], logsSpanDays()).replace(/\.\d+$/, "") + " back" : "newest first");
-      if (state.live && !logs.jump) parts.push("following");
+      if (isLive() && !logs.jump) parts.push("live");
       $("logsSub").textContent = parts.join(" · ");
     });
   }
@@ -440,22 +449,63 @@
       renderLogs();
     });
   }
+  // Live: one stream carries both new matching requests (rows) and "data changed" signals (change, throttled to
+  // the range); if streaming is not possible the page polls instead. While the log shows an earlier moment the
+  // chart keeps moving but new rows wait (Load newer or Back to newest brings them in).
+  function isLive() { return !!state.range; }
+  function vizInterval() {          // seconds between chart redraws: one bar's worth
+    var w = win();
+    return BV.cadence(w.to - w.from, buckets()) / 1000;
+  }
+  function startLive() {
+    stopLive();
+    if (!isLive() || document.hidden) return;
+    var params = apiParams({ kind: "logs", changes: 1, min_interval: vizInterval() });
+    if (logs.maxSeq) params.set("after", logs.maxSeq);   // otherwise the stream starts from now
+    follow = BV.stream(params, {
+      rows: addLiveRows,
+      change: function () { loadViz(true); },
+      fallback: function () {
+        follow = null;
+        clearInterval(timers.logs); clearInterval(timers.viz);
+        timers.logs = setInterval(function () { if (!document.hidden) pollLive(); }, POLL_MS);
+        timers.viz = setInterval(function () { if (!document.hidden) loadViz(true); }, Math.max(10, vizInterval()) * 1000);
+      },
+    });
+  }
+  function stopLive() {
+    if (follow) { follow.close(); follow = null; }
+    clearInterval(timers.logs); clearInterval(timers.viz);
+  }
   function pollLive() {
-    if (!state.live || logs.jump) return;      // while looking at an earlier moment, new rows wait
-    // up to the real now (the range itself ends on a 5 s boundary), so no new row is skipped
-    BV.api("/api/logs", apiParams({ limit: 200, after: logs.maxSeq || 0, to: Date.now() + 60000 })).then(function (d) {
-      if (!d.rows.length || logs.jump) return;
-      logs.maxSeq = d.max_seq;
-      if (logs.total !== null) logs.total += d.rows.length;
-      logs.rows = d.rows.concat(logs.rows).slice(0, 500);
-      var body = $("logsBody");
-      if (body.firstChild && !body.firstChild.hasAttribute("tabindex")) BV.clear(body);
-      for (var i = d.rows.length - 1; i >= 0; i--) body.insertBefore(logRow(d.rows[i], true), body.firstChild);
-      while (body.children.length > 500) body.removeChild(body.lastChild);
-      var parts = [];
-      if (logs.total !== null) parts.push(BV.int(logs.total) + " matching");
-      $("logsSub").textContent = parts.concat(["newest first", "following"]).join(" · ");
-    }).catch(function () { /* the next tick retries */ });
+    if (!isLive() || logs.jump) return;
+    // up to the real now (the range itself ends on a whole second), so no new row is skipped
+    BV.api("/api/logs", apiParams({ limit: 200, after: logs.maxSeq || 0, to: Date.now() + 60000 }))
+      .then(addLiveRows).catch(function () { /* the next tick retries */ });
+  }
+  var unseen = 0;                   // rows that arrived above while you were scrolled down
+  function addLiveRows(d) {
+    if (!d.rows.length || logs.jump || !logs.columns) return;
+    logs.maxSeq = Math.max(logs.maxSeq || 0, d.max_seq || 0);
+    if (logs.total !== null) logs.total += d.rows.length;
+    logs.rows = d.rows.concat(logs.rows).slice(0, 500);
+    var wrap = $("logWrap"), body = $("logsBody"), reading = wrap.scrollTop > 0, before = wrap.scrollHeight;
+    if (body.firstChild && !body.firstChild.hasAttribute("tabindex")) BV.clear(body);
+    for (var i = d.rows.length - 1; i >= 0; i--) body.insertBefore(logRow(d.rows[i], true), body.firstChild);
+    while (body.children.length > 500) body.removeChild(body.lastChild);
+    if (reading) {
+      // scrolled down to read: keep the rows in view where they are, and say how many arrived above
+      wrap.scrollTop += wrap.scrollHeight - before;
+      unseen += d.rows.length;
+    }
+    renderUnseen();
+    var parts = [];
+    if (logs.total !== null) parts.push(BV.int(logs.total) + " matching");
+    $("logsSub").textContent = parts.concat(["newest first", "live"]).join(" · ");
+  }
+  function renderUnseen() {
+    $("unseenBtn").hidden = !unseen;
+    $("unseenBtn").textContent = BV.int(unseen) + " new ↑";
   }
 
   /* ---------- detail drawer ---------- */
@@ -505,12 +555,11 @@
     $("rangeBtn").textContent = "◷ " + BV.rangeLabel(state);
     renderChips();
     buildRangeMenu();
-    $("liveBtn").setAttribute("aria-pressed", String(state.live));
-    $("liveDot").className = "dot" + (state.live ? " live" : "");
+    BV.renderLiveButton($("liveBtn"), $("liveDot"), isLive());
+    unseen = 0; renderUnseen();
     logs.jump = null;
-    loadViz(); loadLogs();
-    clearInterval(timers.logs);
-    if (state.live) timers.logs = setInterval(function () { if (!document.hidden) pollLive(); }, FOLLOW_MS);
+    stopLive();
+    loadViz(); loadLogs();                  // loadLogs goes live once the first page is in
   }
 
   function init() {
@@ -566,18 +615,38 @@
     $("moreBtn").addEventListener("click", loadOlder);
     $("newestBtn").addEventListener("click", backToNewest);
     $("newerBtn").addEventListener("click", loadNewer);
-    $("refreshBtn").addEventListener("click", reloadAll);
     $("liveBtn").addEventListener("click", function () {
-      state.live = !state.live;
-      if (state.live && !state.range) { state.range = "15m"; state.from = state.to = null; }
-      writeUrl(false);
-      reloadAll();
+      if (isLive()) {
+        // Pause: keep exactly what is on screen, as a fixed range (no refetch, so nothing jumps)
+        var w = win();
+        state.resume = state.range;
+        state.range = null; state.from = w.from; state.to = w.to;
+        stopLive();
+        writeUrl(true);
+        $("rangeBtn").textContent = "◷ " + BV.rangeLabel(state);
+        buildRangeMenu();
+        BV.renderLiveButton($("liveBtn"), $("liveDot"), false);
+        loadViz(true);                // same window, now fixed: redraws without the "so far" bar
+        renderLogs();
+      } else {
+        state.range = state.resume || "1h"; state.from = state.to = null;
+        writeUrl(true);
+        reloadAll();
+      }
+    });
+    $("unseenBtn").addEventListener("click", function () {
+      $("logWrap").scrollTo({ top: 0, behavior: "smooth" });
+      unseen = 0; renderUnseen();
+    });
+    $("logWrap").addEventListener("scroll", function () {
+      if (unseen && $("logWrap").scrollTop === 0) { unseen = 0; renderUnseen(); }
     });
     $("drawerClose").addEventListener("click", closeDetail);
     $("scrim").addEventListener("click", closeDetail);
     window.addEventListener("popstate", function () { readUrl(); reloadAll(); });
     document.addEventListener("visibilitychange", function () {
-      if (!document.hidden && state.live) pollLive();
+      if (document.hidden) { stopLive(); return; }
+      if (isLive()) { startLive(); loadViz(true); }   // resumes after the last request shown: nothing is missed
     });
   }
   init();

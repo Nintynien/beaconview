@@ -31,6 +31,19 @@ A fuller example is in [docker-compose.example.yml](docker-compose.example.yml).
 **BeaconView shows visitor IPs and request paths. Never expose it without authentication** (a Traefik basic-auth
 middleware, or `BASIC_AUTH_USER` / `BASIC_AUTH_PASSWORD`).
 
+## Authentication
+
+BeaconView has no user accounts. It shows visitor IPs and request paths, and its settings page can change how long
+data is kept, so **put it behind authentication before anyone else can reach it**:
+
+- **Traefik basic auth** (simplest): add a `basicauth` middleware to BeaconView's router, as in
+  [docker-compose.example.yml](docker-compose.example.yml).
+- **Single sign-on**: forward-auth to [Authelia](https://www.authelia.com/), [Authentik](https://goauthentik.io/) or
+  [oauth2-proxy](https://oauth2-proxy.github.io/oauth2-proxy/), the same way you protect your other internal apps.
+- **No proxy in front?** Set `BASIC_AUTH_USER` and `BASIC_AUTH_PASSWORD` and BeaconView asks for them itself.
+
+`/healthz` always answers without credentials (it says only whether ingest is running), for container health checks.
+
 ## Configuration
 
 | Variable | Default | |
@@ -41,6 +54,7 @@ middleware, or `BASIC_AUTH_USER` / `BASIC_AUTH_PASSWORD`).
 | `LOG_FORMAT` | `traefik` | |
 | `RETENTION_DAYS` | `7` | every request is kept this long |
 | `ROLLUP_RETENTION_DAYS` | `90` | per-minute totals are kept this long |
+| `BACKFILL` | `0` | on first start, also read the rotated logs already on disk (`access.log.1`, `.gz` files) |
 | `CLIENT_IP_HEADER` | | e.g. `CF-Connecting-IP` behind Cloudflare (Traefik must keep that header) |
 | `ANONYMIZE_IPS` | `0` | store /24 (IPv4) and /48 (IPv6) networks instead of addresses |
 | `DB_MEMORY_LIMIT` | `512MB` | |
@@ -48,6 +62,10 @@ middleware, or `BASIC_AUTH_USER` / `BASIC_AUTH_PASSWORD`).
 | `BASIC_AUTH_USER` / `BASIC_AUTH_PASSWORD` | | optional built-in authentication |
 | `DATA_DIR` | `/data` | |
 | `PORT` | `8080` | |
+
+Retention, the client IP header and IP anonymization can also be changed on the **Settings** page while
+BeaconView runs. A value set by an environment variable wins and is shown locked there, so your compose file stays
+the source of truth for whatever it sets; the rest are saved in BeaconView's database.
 
 `GET /api/status` reports ingest progress, storage size and retention; `GET /healthz` is the unauthenticated
 liveness probe.

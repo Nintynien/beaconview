@@ -4,8 +4,9 @@
    4px rounded data-end, 2px lines with a ringed end dot, hairline solid grid. Hover is a per-bucket band (columns) or
    crosshair (lines) with one tooltip listing every series; arrow keys step through buckets when the chart has focus;
    dragging across the plot zooms to that range, a click (or Enter on a focused bucket) calls onClick(bucket).
-   mark(i) highlights a bucket from outside, without a tooltip (a hovered log row showing where it sits). Every value
-   is also in the table view. */
+   mark(i) highlights a bucket from outside, without a tooltip (a hovered log row showing where it sits). opts.partial
+   is the index of a bucket still filling (the newest one on a live range): drawn lighter and labelled "so far", so
+   its short bar does not read as a drop in traffic. Every value is also in the table view. */
 "use strict";
 (function () {
   var el = BV.el;
@@ -106,7 +107,7 @@
             var d = k === topIndex
               ? roundTop(x0, top, bw, Math.max(0.5, h - gap), 4)
               : "M" + x0 + "," + top + "H" + (x0 + bw) + "V" + (base - gap) + "H" + x0 + "Z";
-            svg.appendChild(el("svg:path", { d: d, fill: s.color }));
+            svg.appendChild(el("svg:path", { d: d, fill: s.color, "fill-opacity": j === o.partial ? 0.45 : null }));
             base = top;
           });
         }
@@ -171,7 +172,8 @@
       if (quiet) { tip.hidden = true; return; }
       var t0 = o.start + i * o.step, span = o.n * o.step;
       BV.clear(tip);
-      tip.appendChild(el("div", { class: "when", text: BV.when(t0, span) + " – " + BV.when(t0 + o.step, span) }));
+      tip.appendChild(el("div", { class: "when", text: BV.when(t0, span) + " – " + BV.when(t0 + o.step, span) +
+        (i === o.partial ? " (so far)" : "") }));
       var rows = o.series.slice();
       if (o.kind === "columns") rows.reverse();          // top of the stack first, as on screen
       var total = 0, fmt = o.tipFormat || BV.int;
